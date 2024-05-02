@@ -10,7 +10,6 @@
   "author": "hideokamoto",
   "license": "GPL-3.0-or-later",
   "devDependencies": {
-    "@wordpress/env": "^9.8.0",
-    "@wp-now/wp-now": "^0.1.70"
+    "@wordpress/env": "^9.8.0"
   }
 }
