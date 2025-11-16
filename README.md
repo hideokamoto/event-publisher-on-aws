@@ -31,7 +31,7 @@ define('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY', 'your-secret-access-key');
 
 // オプション設定
 define('AWS_EVENTBRIDGE_REGION', 'ap-northeast-1'); // デフォルト: ap-northeast-1
-define('EVENT_BUS_NAME', 'wp-kyoto'); // デフォルト: default
+define('EVENT_BUS_NAME', 'default'); // デフォルト: default（カスタムバスを使う場合は 'your-custom-bus' など）
 define('EVENT_SOURCE_NAME', 'wordpress'); // デフォルト: wordpress
 ```
 
@@ -54,7 +54,7 @@ EC2インスタンス上で動作している場合、IAMロールを使用し�
 ```php
 // オプション設定
 define('AWS_EVENTBRIDGE_REGION', 'ap-northeast-1'); // デフォルト: インスタンスのリージョン
-define('EVENT_BUS_NAME', 'wp-kyoto'); // デフォルト: default
+define('EVENT_BUS_NAME', 'default'); // デフォルト: default（カスタムバスを使う場合は 'your-custom-bus' など）
 define('EVENT_SOURCE_NAME', 'wordpress'); // デフォルト: wordpress
 ```
 
@@ -66,11 +66,13 @@ WordPress管理画面の「プラグイン」から「EventBridge Post Events」
 
 ### 記事公開・更新時
 
+新規公開時は`DetailType: "post.published"`、既に公開済みの記事を更新した場合は`DetailType: "post.updated"`が設定されます。
+
 ```json
 {
-  "EventBusName": "wp-kyoto",
+  "EventBusName": "default",
   "Source": "wordpress",
-  "DetailType": "post.published" または "post.updated",
+  "DetailType": "post.published",
   "Detail": {
     "id": "123",
     "title": "記事タイトル",
@@ -88,7 +90,7 @@ WordPress管理画面の「プラグイン」から「EventBridge Post Events」
 
 ```json
 {
-  "EventBusName": "wp-kyoto",
+  "EventBusName": "default",
   "Source": "wordpress",
   "DetailType": "post.deleted",
   "Detail": {
@@ -108,11 +110,16 @@ EventBridgeにイベントを送信するため、以下のIAMポリシーが必
     {
       "Effect": "Allow",
       "Action": "events:PutEvents",
-      "Resource": "arn:aws:events:ap-northeast-1:123456789012:event-bus/wp-kyoto"
+      "Resource": "arn:aws:events:{region}:{account-id}:event-bus/{your-event-bus-name}"
     }
   ]
 }
 ```
+
+**パラメータ説明:**
+- `{region}`: 使用するAWSリージョン（例: `ap-northeast-1`）
+- `{account-id}`: AWSアカウントID（例: `123456789012`）
+- `{your-event-bus-name}`: イベントバス名（`EVENT_BUS_NAME`で設定した値、デフォルトは `default`）
 
 ## トラブルシューティング
 

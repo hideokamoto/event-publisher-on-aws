@@ -323,14 +323,18 @@ class EventBridgePostEvents
      */
     public function show_config_notice()
     {
-        echo '<div class="notice notice-error"><p>';
-        echo '<strong>EventBridge Post Events:</strong> AWS認証情報が設定されていません。<br>';
-        echo '以下のいずれかの方法で認証情報を設定してください：<br><br>';
-        echo '<strong>方法1:</strong> wp-config.phpに定数を追加<br>';
-        echo '<code>define(\'AWS_EVENTBRIDGE_ACCESS_KEY_ID\', \'your-access-key-id\');</code><br>';
-        echo '<code>define(\'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY\', \'your-secret-access-key\');</code><br><br>';
-        echo '<strong>方法2:</strong> EC2インスタンスロールを使用（EC2上で動作している場合）';
-        echo '</p></div>';
+        printf(
+            '<div class="notice notice-error"><p>' .
+            '<strong>EventBridge Post Events:</strong> AWS認証情報が設定されていません。<br>' .
+            '以下のいずれかの方法で認証情報を設定してください：<br><br>' .
+            '<strong>方法1:</strong> wp-config.phpに定数を追加<br>' .
+            '<code>%s</code><br>' .
+            '<code>%s</code><br><br>' .
+            '<strong>方法2:</strong> EC2インスタンスロールを使用（EC2上で動作している場合）' .
+            '</p></div>',
+            esc_html("define('AWS_EVENTBRIDGE_ACCESS_KEY_ID', 'your-access-key-id');"),
+            esc_html("define('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY', 'your-secret-access-key');")
+        );
     }
 
     /**
@@ -363,7 +367,11 @@ class EventBridgePostEvents
         $event_name = $new_status === $old_status ? 'post.updated' :'post.' . $new_status . 'ed'; // post.published、post.drafted など
         $permalink = get_permalink($post->ID);
         $post_type = $post->post_type;
-        $api_url = get_rest_url(null, 'wp/v2/' . $post_type . 's/' . $post->ID);
+
+        // REST APIのベースURLを取得（カスタム投稿タイプのrest_baseに対応）
+        $post_type_obj = get_post_type_object($post_type);
+        $rest_base = ($post_type_obj && !empty($post_type_obj->rest_base)) ? $post_type_obj->rest_base : $post_type;
+        $api_url = get_rest_url(null, 'wp/v2/' . $rest_base . '/' . $post->ID);
 
         $event_data = array(
             'id' => (string)$post->ID,
