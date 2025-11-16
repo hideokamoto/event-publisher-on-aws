@@ -9,8 +9,22 @@ Author URI: https://example.com
 */
 
 // EventBridge設定
-define('EVENT_BUS_NAME', 'wp-kyoto'); // デフォルトのイベントバスを使用する場合
-define('EVENT_SOURCE_NAME', 'wordpress'); // デフォルトのイベントバスを使用する場合
+// これらの定数はwp-config.phpで定義してください
+// define('AWS_EVENTBRIDGE_ACCESS_KEY_ID', 'your-access-key-id');
+// define('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY', 'your-secret-access-key');
+// define('AWS_EVENTBRIDGE_REGION', 'ap-northeast-1');
+// define('EVENT_BUS_NAME', 'wp-kyoto');
+// define('EVENT_SOURCE_NAME', 'wordpress');
+
+if (!defined('EVENT_BUS_NAME')) {
+    define('EVENT_BUS_NAME', 'default');
+}
+if (!defined('EVENT_SOURCE_NAME')) {
+    define('EVENT_SOURCE_NAME', 'wordpress');
+}
+if (!defined('AWS_EVENTBRIDGE_REGION')) {
+    define('AWS_EVENTBRIDGE_REGION', 'ap-northeast-1');
+}
 
 class EventBridgePutEvents
 {
@@ -83,15 +97,30 @@ class EventBridgePutEvents
             'method' => $method,
             'headers' => $headers,
             'body' => $payload,
+            'timeout' => 10,
         ));
 
-        if (!is_wp_error($response)) {
-            $responseBody = wp_remote_retrieve_body($response);
-            $data = json_decode($responseBody, true);
-            error_log('Response: ' . print_r($data, true));
-        } else {
-            error_log('Error: ' . $response->get_error_message());
+        if (is_wp_error($response)) {
+            error_log('EventBridge API Error: ' . $response->get_error_message());
+            return false;
         }
+
+        $responseBody = wp_remote_retrieve_body($response);
+        $statusCode = wp_remote_retrieve_response_code($response);
+        $data = json_decode($responseBody, true);
+
+        if ($statusCode !== 200) {
+            error_log('EventBridge API Error (HTTP ' . $statusCode . '): ' . $responseBody);
+            return false;
+        }
+
+        if (!empty($data['FailedEntryCount']) && $data['FailedEntryCount'] > 0) {
+            error_log('EventBridge Failed Entries: ' . print_r($data['Entries'], true));
+            return false;
+        }
+
+        error_log('EventBridge Event Sent Successfully: ' . $payload);
+        return true;
     }
 
     private function getSignatureKey($dateStamp)
@@ -114,15 +143,39 @@ class EventBridgePostEvents
 
     public function __construct()
     {
-        $identity = $this->get_instance_identity();
-        $this->region = $identity['region'];
-		$this->client = new EventBridgePutEvents(AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY, $this->region);
+        // 認証情報のチェック
+        if (!defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') || !defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY')) {
+            add_action('admin_notices', array($this, 'show_config_notice'));
+            return;
+        }
+
+        // リージョンの取得（優先順位: 定数 > インスタンスメタデータ > デフォルト）
+        if (defined('AWS_EVENTBRIDGE_REGION')) {
+            $this->region = AWS_EVENTBRIDGE_REGION;
+        } else {
+            $identity = $this->get_instance_identity();
+            $this->region = !empty($identity['region']) ? $identity['region'] : 'ap-northeast-1';
+        }
+
+        $this->client = new EventBridgePutEvents(AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY, $this->region);
 
         // 投稿を新規公開、更新した際のアクション
         add_action('transition_post_status', array($this, 'send_post_event'), 10, 3);
 
         // 投稿を削除した際のアクション
         add_action('before_delete_post', array($this, 'send_delete_post_event'), 10, 1);
+    }
+
+    /**
+     * 設定が不足している場合の管理画面通知
+     */
+    public function show_config_notice()
+    {
+        echo '<div class="notice notice-error"><p>';
+        echo '<strong>EventBridge Post Events:</strong> AWS認証情報が設定されていません。wp-config.phpに以下の定数を追加してください：<br>';
+        echo '<code>define(\'AWS_EVENTBRIDGE_ACCESS_KEY_ID\', \'your-access-key-id\');</code><br>';
+        echo '<code>define(\'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY\', \'your-secret-access-key\');</code>';
+        echo '</p></div>';
     }
 
     /**
@@ -148,14 +201,14 @@ class EventBridgePostEvents
      * @param WP_Post $post_before 更新前の投稿オブジェクト (更新の場合)
      */
     public function send_post_event($new_status, $old_status, $post)
-    {		
+    {
         if ($new_status !== 'publish') {
             return;
         }
         $event_name = $new_status === $old_status ? 'post.updated' :'post.' . $new_status . 'ed'; // post.published、post.drafted など
         $permalink = get_permalink($post->ID);
         $post_type = $post->post_type;
-        $api_url = get_rest_url(null, 'wp/v2/' . $post_type . 's/' . $post_id);
+        $api_url = get_rest_url(null, 'wp/v2/' . $post_type . 's/' . $post->ID);
 
         $event_data = array(
             'id' => (string)$post->ID,
