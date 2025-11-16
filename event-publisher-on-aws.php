@@ -26,18 +26,136 @@ if (!defined('AWS_EVENTBRIDGE_REGION')) {
     define('AWS_EVENTBRIDGE_REGION', 'ap-northeast-1');
 }
 
+/**
+ * IMDSv2を使ってEC2インスタンスロールから認証情報を取得するクラス
+ */
+class AWS_IMDS_Credentials
+{
+    private $credentials = null;
+    private $expiresAt = null;
+    private $imdsEndpoint = 'http://169.254.169.254';
+
+    /**
+     * 認証情報を取得（キャッシュ機能付き）
+     *
+     * @return array|false 認証情報の配列、失敗時はfalse
+     */
+    public function getCredentials()
+    {
+        // キャッシュが有効かチェック（有効期限の5分前に更新）
+        if ($this->credentials && $this->expiresAt && time() < ($this->expiresAt - 300)) {
+            return $this->credentials;
+        }
+
+        // IMDSv2トークンを取得
+        $token = $this->getImdsToken();
+        if (!$token) {
+            return false;
+        }
+
+        // ロール名を取得
+        $roleName = $this->getIamRole($token);
+        if (!$roleName) {
+            return false;
+        }
+
+        // 認証情報を取得
+        $credentials = $this->getIamCredentials($token, $roleName);
+        if ($credentials) {
+            $this->credentials = $credentials;
+            $this->expiresAt = strtotime($credentials['Expiration']);
+        }
+
+        return $credentials;
+    }
+
+    /**
+     * IMDSv2トークンを取得
+     *
+     * @return string|false トークン、失敗時はfalse
+     */
+    private function getImdsToken()
+    {
+        $response = wp_remote_request("{$this->imdsEndpoint}/latest/api/token", array(
+            'method' => 'PUT',
+            'headers' => array(
+                'X-aws-ec2-metadata-token-ttl-seconds' => '21600',
+            ),
+            'timeout' => 1,
+        ));
+
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+            return false;
+        }
+
+        return wp_remote_retrieve_body($response);
+    }
+
+    /**
+     * IAMロール名を取得
+     *
+     * @param string $token IMDSv2トークン
+     * @return string|false ロール名、失敗時はfalse
+     */
+    private function getIamRole($token)
+    {
+        $response = wp_remote_get("{$this->imdsEndpoint}/latest/meta-data/iam/security-credentials/", array(
+            'headers' => array(
+                'X-aws-ec2-metadata-token' => $token,
+            ),
+            'timeout' => 1,
+        ));
+
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+            return false;
+        }
+
+        return trim(wp_remote_retrieve_body($response));
+    }
+
+    /**
+     * IAM認証情報を取得
+     *
+     * @param string $token IMDSv2トークン
+     * @param string $roleName IAMロール名
+     * @return array|false 認証情報の配列、失敗時はfalse
+     */
+    private function getIamCredentials($token, $roleName)
+    {
+        $response = wp_remote_get("{$this->imdsEndpoint}/latest/meta-data/iam/security-credentials/{$roleName}", array(
+            'headers' => array(
+                'X-aws-ec2-metadata-token' => $token,
+            ),
+            'timeout' => 1,
+        ));
+
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+            return false;
+        }
+
+        $data = json_decode(wp_remote_retrieve_body($response), true);
+        if (!$data || !isset($data['AccessKeyId']) || !isset($data['SecretAccessKey'])) {
+            return false;
+        }
+
+        return $data;
+    }
+}
+
 class EventBridgePutEvents
 {
     private $accessKeyId;
     private $secretAccessKey;
+    private $sessionToken;
     private $region;
     private $endpoint;
     private $serviceName;
 
-    public function __construct($accessKeyId, $secretAccessKey, $region)
+    public function __construct($accessKeyId, $secretAccessKey, $region, $sessionToken = null)
     {
         $this->accessKeyId = $accessKeyId;
         $this->secretAccessKey = $secretAccessKey;
+        $this->sessionToken = $sessionToken;
         $this->region = $region;
         $this->endpoint = 'events.' . $region . '.amazonaws.com';
         $this->serviceName = 'events';
@@ -62,8 +180,15 @@ class EventBridgePutEvents
         $amzDate = $now->format('Ymd\THis\Z');
         $dateStamp = $now->format('Ymd');
 
-        $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-target:AWSEvents.PutEvents\n";
-        $signedHeaders = 'content-type;host;x-amz-date;x-amz-target';
+        // セッショントークンがある場合はヘッダーに含める
+        if ($this->sessionToken) {
+            $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-security-token:{$this->sessionToken}\nx-amz-target:AWSEvents.PutEvents\n";
+            $signedHeaders = 'content-type;host;x-amz-date;x-amz-security-token;x-amz-target';
+        } else {
+            $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-target:AWSEvents.PutEvents\n";
+            $signedHeaders = 'content-type;host;x-amz-date;x-amz-target';
+        }
+
         $canonicalRequest = implode("\n", array(
             $method,
             $path,
@@ -92,6 +217,11 @@ class EventBridgePutEvents
             'X-Amz-Target' => 'AWSEvents.PutEvents',
             'Authorization' => $authorizationHeader,
         );
+
+        // セッショントークンがある場合はヘッダーに追加
+        if ($this->sessionToken) {
+            $headers['X-Amz-Security-Token'] = $this->sessionToken;
+        }
 
         $response = wp_remote_request("https://{$this->endpoint}{$path}", array(
             'method' => $method,
@@ -140,13 +270,35 @@ class EventBridgePostEvents
     private $region;
     private $credentials;
     private $client;
+    private $imdsProvider;
 
     public function __construct()
     {
-        // 認証情報のチェック
-        if (!defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') || !defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY')) {
-            add_action('admin_notices', array($this, 'show_config_notice'));
-            return;
+        // 認証情報の取得（優先順位: wp-config.php定数 > インスタンスロール）
+        $accessKeyId = null;
+        $secretAccessKey = null;
+        $sessionToken = null;
+
+        if (defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') && defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY')) {
+            // wp-config.phpで定義された認証情報を使用
+            $accessKeyId = AWS_EVENTBRIDGE_ACCESS_KEY_ID;
+            $secretAccessKey = AWS_EVENTBRIDGE_SECRET_ACCESS_KEY;
+            error_log('EventBridge: Using credentials from wp-config.php');
+        } else {
+            // インスタンスロールから認証情報を取得
+            $this->imdsProvider = new AWS_IMDS_Credentials();
+            $credentials = $this->imdsProvider->getCredentials();
+
+            if ($credentials) {
+                $accessKeyId = $credentials['AccessKeyId'];
+                $secretAccessKey = $credentials['SecretAccessKey'];
+                $sessionToken = isset($credentials['Token']) ? $credentials['Token'] : null;
+                error_log('EventBridge: Using credentials from EC2 instance role');
+            } else {
+                // 認証情報が取得できない場合は警告を表示
+                add_action('admin_notices', array($this, 'show_config_notice'));
+                return;
+            }
         }
 
         // リージョンの取得（優先順位: 定数 > インスタンスメタデータ > デフォルト）
@@ -157,7 +309,7 @@ class EventBridgePostEvents
             $this->region = !empty($identity['region']) ? $identity['region'] : 'ap-northeast-1';
         }
 
-        $this->client = new EventBridgePutEvents(AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY, $this->region);
+        $this->client = new EventBridgePutEvents($accessKeyId, $secretAccessKey, $this->region, $sessionToken);
 
         // 投稿を新規公開、更新した際のアクション
         add_action('transition_post_status', array($this, 'send_post_event'), 10, 3);
@@ -172,9 +324,12 @@ class EventBridgePostEvents
     public function show_config_notice()
     {
         echo '<div class="notice notice-error"><p>';
-        echo '<strong>EventBridge Post Events:</strong> AWS認証情報が設定されていません。wp-config.phpに以下の定数を追加してください：<br>';
+        echo '<strong>EventBridge Post Events:</strong> AWS認証情報が設定されていません。<br>';
+        echo '以下のいずれかの方法で認証情報を設定してください：<br><br>';
+        echo '<strong>方法1:</strong> wp-config.phpに定数を追加<br>';
         echo '<code>define(\'AWS_EVENTBRIDGE_ACCESS_KEY_ID\', \'your-access-key-id\');</code><br>';
-        echo '<code>define(\'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY\', \'your-secret-access-key\');</code>';
+        echo '<code>define(\'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY\', \'your-secret-access-key\');</code><br><br>';
+        echo '<strong>方法2:</strong> EC2インスタンスロールを使用（EC2上で動作している場合）';
         echo '</p></div>';
     }
 

@@ -8,6 +8,7 @@ WordPressの記事更新イベントをAWS EventBridgeに送信するプラグ�
 - **バンドルサイズ小**: 依存ライブラリなし、単一ファイル
 - **ネームスペース衝突なし**: 最小限のクラス定義のみ
 - **シンプル**: wp-config.phpで設定を完結
+- **EC2インスタンスロール対応**: IMDSv2を使った自動認証情報取得をサポート
 
 ## セットアップ
 
@@ -16,6 +17,10 @@ WordPressの記事更新イベントをAWS EventBridgeに送信するプラグ�
 このディレクトリを`wp-content/plugins/`にコピーしてください。
 
 ### 2. AWS認証情報の設定
+
+以下のいずれかの方法で認証情報を設定してください。
+
+#### 方法A: wp-config.phpで設定（推奨：ローカル・Lightsail等）
 
 `wp-config.php`に以下の定数を追加してください：
 
@@ -26,6 +31,29 @@ define('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY', 'your-secret-access-key');
 
 // オプション設定
 define('AWS_EVENTBRIDGE_REGION', 'ap-northeast-1'); // デフォルト: ap-northeast-1
+define('EVENT_BUS_NAME', 'wp-kyoto'); // デフォルト: default
+define('EVENT_SOURCE_NAME', 'wordpress'); // デフォルト: wordpress
+```
+
+#### 方法B: EC2インスタンスロールを使用（推奨：EC2）
+
+EC2インスタンス上で動作している場合、IAMロールを使用した認証が可能です。wp-config.phpへの認証情報の記載は不要です。
+
+1. EC2インスタンスにIAMロールをアタッチ
+2. IAMロールに必要なポリシーを追加（下記のIAMポリシーを参照）
+3. プラグインを有効化するだけで自動的にインスタンスロールから認証情報を取得
+
+**認証情報の優先順位:**
+1. wp-config.phpの定数（定義されている場合）
+2. EC2インスタンスロール（IMDSv2経由で自動取得）
+
+**オプション設定（インスタンスロール使用時）:**
+
+リージョンやイベントバス名をカスタマイズする場合は、`wp-config.php`に以下を追加：
+
+```php
+// オプション設定
+define('AWS_EVENTBRIDGE_REGION', 'ap-northeast-1'); // デフォルト: インスタンスのリージョン
 define('EVENT_BUS_NAME', 'wp-kyoto'); // デフォルト: default
 define('EVENT_SOURCE_NAME', 'wordpress'); // デフォルト: wordpress
 ```
@@ -107,9 +135,17 @@ define('WP_DEBUG_LOG', true);
 
 このプラグインは以下のように動作します：
 
-1. **WordPressアクションフック**: `transition_post_status`と`before_delete_post`を使用してイベントをキャプチャ
-2. **AWS Signature V4**: PHPの標準関数でリクエストに署名
-3. **HTTP送信**: WordPressの`wp_remote_request()`でEventBridge APIにPOST
+1. **認証情報の取得**:
+   - wp-config.phpに定数が定義されている場合はそれを使用
+   - 定義がない場合はIMDSv2を使ってEC2インスタンスロールから一時認証情報を取得
+   - 一時認証情報は有効期限の5分前に自動更新（キャッシュ機能付き）
+
+2. **WordPressアクションフック**: `transition_post_status`と`before_delete_post`を使用してイベントをキャプチャ
+
+3. **AWS Signature V4**: PHPの標準関数でリクエストに署名
+   - セッショントークンがある場合は`X-Amz-Security-Token`ヘッダーを追加
+
+4. **HTTP送信**: WordPressの`wp_remote_request()`でEventBridge APIにPOST
 
 AWS SDKを使わずに、EventBridge APIを直接呼び出しています。
 
