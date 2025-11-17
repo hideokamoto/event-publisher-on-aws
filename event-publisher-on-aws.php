@@ -70,6 +70,38 @@ class AWS_IMDS_Credentials
     }
 
     /**
+     * インスタンス識別情報を取得（IMDSv2使用）
+     *
+     * @return array|false インスタンス識別情報の配列、失敗時はfalse
+     */
+    public function getInstanceIdentity()
+    {
+        // IMDSv2トークンを取得
+        $token = $this->getImdsToken();
+        if (!$token) {
+            return false;
+        }
+
+        $response = wp_remote_get("{$this->imdsEndpoint}/latest/dynamic/instance-identity/document", array(
+            'headers' => array(
+                'X-aws-ec2-metadata-token' => $token,
+            ),
+            'timeout' => 1,
+        ));
+
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+            return false;
+        }
+
+        $data = json_decode(wp_remote_retrieve_body($response), true);
+        if (json_last_error() !== JSON_ERROR_NONE || !$data) {
+            return false;
+        }
+
+        return $data;
+    }
+
+    /**
      * IMDSv2トークンを取得
      *
      * @return string|false トークン、失敗時はfalse
@@ -235,12 +267,22 @@ class EventBridgePutEvents
             return false;
         }
 
-        $responseBody = wp_remote_retrieve_body($response);
         $statusCode = wp_remote_retrieve_response_code($response);
-        $data = json_decode($responseBody, true);
+        $responseBody = wp_remote_retrieve_body($response);
 
         if ($statusCode !== 200) {
             error_log('EventBridge API Error (HTTP ' . $statusCode . '): ' . $responseBody);
+            return false;
+        }
+
+        $data = json_decode($responseBody, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            error_log('EventBridge JSON Decode Error: ' . json_last_error_msg() . ' - Response: ' . $responseBody);
+            return false;
+        }
+
+        if (!$data) {
+            error_log('EventBridge Invalid Response: ' . $responseBody);
             return false;
         }
 
@@ -305,7 +347,11 @@ class EventBridgePostEvents
         if (defined('AWS_EVENTBRIDGE_REGION')) {
             $this->region = AWS_EVENTBRIDGE_REGION;
         } else {
-            $identity = $this->get_instance_identity();
+            // IMDSv2を使ってリージョンを取得
+            if (!$this->imdsProvider) {
+                $this->imdsProvider = new AWS_IMDS_Credentials();
+            }
+            $identity = $this->imdsProvider->getInstanceIdentity();
             $this->region = !empty($identity['region']) ? $identity['region'] : 'ap-northeast-1';
         }
 
@@ -337,21 +383,6 @@ class EventBridgePostEvents
         );
     }
 
-    /**
-     * インスタンスメタデータから識別情報を取得する
-     *
-     * @return array インスタンス識別情報
-     */
-    private function get_instance_identity()
-    {
-        $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document');
-        if (is_wp_error($response)) {
-            return array();
-        }
-        $body = wp_remote_retrieve_body($response);
-        return json_decode($body, true);
-    }
-    
     /**
      * 投稿のイベントをEventBridgeに送信する
      *
