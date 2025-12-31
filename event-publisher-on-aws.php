@@ -299,6 +299,18 @@ class EventBridgePostEvents
 
     public function __construct()
     {
+        // AWS認証情報の検証
+        if (!defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') || !defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY')) {
+            add_action('admin_notices', function() {
+                ?>
+                <div class="notice notice-error">
+                    <p><?php esc_html_e('EventBridge Post Events: AWS認証情報が設定されていません。wp-config.phpでAWS_EVENTBRIDGE_ACCESS_KEY_IDとAWS_EVENTBRIDGE_SECRET_ACCESS_KEY定数を定義してください。', 'eventbridge-post-events'); ?></p>
+                </div>
+                <?php
+            });
+            return;
+        }
+
         $identity = $this->get_instance_identity();
         $this->region = $identity['region'];
 		$this->client = new EventBridgePutEvents(AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY, $this->region);
@@ -595,129 +607,6 @@ class EventBridgePostEvents
 
         // 非同期でEventBridgeに送信（UIをブロックしない）
         wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_data));
-    }
-
-    /**
-     * Display admin notice when failure count exceeds threshold
-     */
-    public function display_failure_notice()
-    {
-        // Only show to administrators
-        if (!current_user_can('manage_options')) {
-            return;
-        }
-
-        // Check if notice was dismissed
-        if (get_transient(self::TRANSIENT_NOTICE_DISMISSED)) {
-            return;
-        }
-
-        // Check if failure count exceeds threshold
-        $failure_count = $this->failed_events;
-        if ($failure_count < self::FAILURE_THRESHOLD) {
-            return;
-        }
-
-        // Get failure details from consolidated option
-        $failure_details = get_option(self::OPTION_FAILURE_DETAILS, array(
-            'last_failure_time' => 'Unknown',
-            'messages' => array()
-        ));
-
-        $last_failure_time = $failure_details['last_failure_time'] ?: 'Unknown';
-        $failure_messages = $failure_details['messages'];
-        $success_count = $this->successful_events;
-
-        // Get most recent error message using array indexing (safer than end())
-        $recent_error = 'Unknown error';
-        if (!empty($failure_messages)) {
-            $last_index = count($failure_messages) - 1;
-            $recent_error = isset($failure_messages[$last_index]['message'])
-                ? $failure_messages[$last_index]['message']
-                : 'Unknown error';
-        }
-
-        // Create dismiss URL
-        $dismiss_url = add_query_arg(array(
-            'eventbridge_dismiss_notice' => '1',
-            'eventbridge_nonce' => wp_create_nonce('eventbridge_dismiss_notice')
-        ));
-
-        // Display the notice
-        ?>
-        <div class="notice notice-error is-dismissible">
-            <h3><?php esc_html_e('EventBridge Publishing Failures Detected', 'eventbridge-post-events'); ?></h3>
-            <p><strong><?php esc_html_e('Action Required:', 'eventbridge-post-events'); ?></strong> <?php esc_html_e('EventBridge event publishing is experiencing failures.', 'eventbridge-post-events'); ?></p>
-            <ul>
-                <li><strong><?php esc_html_e('Failed Events:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($failure_count); ?></li>
-                <li><strong><?php esc_html_e('Successful Events:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($success_count); ?></li>
-                <li><strong><?php esc_html_e('Last Failure:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($last_failure_time); ?></li>
-                <li><strong><?php esc_html_e('Recent Error:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($recent_error); ?></li>
-            </ul>
-            <p>
-                <strong><?php esc_html_e('Recommended Actions:', 'eventbridge-post-events'); ?></strong>
-            </p>
-            <ol>
-                <li><?php esc_html_e('Check your AWS EventBridge credentials (AWS_EVENTBRIDGE_ACCESS_KEY_ID and AWS_EVENTBRIDGE_SECRET_ACCESS_KEY)', 'eventbridge-post-events'); ?></li>
-                <li><?php printf(esc_html__('Verify EventBridge event bus "%s" exists in region "%s"', 'eventbridge-post-events'), esc_html(EVENT_BUS_NAME), esc_html($this->region)); ?></li>
-                <li>
-                    <?php
-                    // Check for known error log plugins before displaying link
-                    if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-                        $log_path = defined('WP_DEBUG_LOG') && is_string(WP_DEBUG_LOG) ? WP_DEBUG_LOG : WP_CONTENT_DIR . '/debug.log';
-                        printf(
-                            esc_html__('Check error logs at %s or enable WP_DEBUG_LOG in wp-config.php', 'eventbridge-post-events'),
-                            '<code>' . esc_html($log_path) . '</code>'
-                        );
-                    } else {
-                        esc_html_e('Enable WP_DEBUG_LOG in wp-config.php and check wp-content/debug.log for error details', 'eventbridge-post-events');
-                    }
-                    ?>
-                </li>
-                <li><?php esc_html_e('Ensure IAM permissions include "events:PutEvents" for the event bus', 'eventbridge-post-events'); ?></li>
-            </ol>
-            <p>
-                <a href="<?php echo esc_url($dismiss_url); ?>" class="button button-primary"><?php esc_html_e('Dismiss for 24 hours', 'eventbridge-post-events'); ?></a>
-            </p>
-        </div>
-        <?php
-    }
-
-    /**
-     * Handle admin notice dismissal
-     */
-    public function handle_notice_dismissal()
-    {
-        // Check if dismiss action was triggered
-        if (!isset($_GET['eventbridge_dismiss_notice'])) {
-            return;
-        }
-
-        // Sanitize and unslash nonce before verification
-        if (!isset($_GET['eventbridge_nonce'])) {
-            return;
-        }
-
-        $nonce = sanitize_text_field(wp_unslash($_GET['eventbridge_nonce']));
-        if (!wp_verify_nonce($nonce, 'eventbridge_dismiss_notice')) {
-            return;
-        }
-
-        // Only allow administrators
-        if (!current_user_can('manage_options')) {
-            return;
-        }
-
-        // Set transient to dismiss notice for 24 hours
-        set_transient(self::TRANSIENT_NOTICE_DISMISSED, true, 24 * HOUR_IN_SECONDS);
-
-        // Reset failure counter to prevent alert fatigue
-        $this->failed_events = 0;
-        $this->save_metrics();
-
-        // Safely redirect to remove query parameters
-        wp_safe_redirect(remove_query_arg(array('eventbridge_dismiss_notice', 'eventbridge_nonce')));
-        exit;
     }
 
     /**
