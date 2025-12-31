@@ -417,8 +417,13 @@ class EventBridgePostEvents
             return;
         }
 
-        // Verify nonce
-        if (!isset($_GET['eventbridge_nonce']) || !wp_verify_nonce($_GET['eventbridge_nonce'], 'eventbridge_dismiss_notice')) {
+        // Sanitize and unslash nonce before verification
+        if (!isset($_GET['eventbridge_nonce'])) {
+            return;
+        }
+
+        $nonce = sanitize_text_field(wp_unslash($_GET['eventbridge_nonce']));
+        if (!wp_verify_nonce($nonce, 'eventbridge_dismiss_notice')) {
             return;
         }
 
@@ -434,8 +439,8 @@ class EventBridgePostEvents
         $this->failed_events = 0;
         $this->save_metrics();
 
-        // Redirect to remove query parameters
-        wp_redirect(remove_query_arg(array('eventbridge_dismiss_notice', 'eventbridge_nonce')));
+        // Safely redirect to remove query parameters
+        wp_safe_redirect(remove_query_arg(array('eventbridge_dismiss_notice', 'eventbridge_nonce')));
         exit;
     }
 }
