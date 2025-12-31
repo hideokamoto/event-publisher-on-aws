@@ -251,9 +251,9 @@ class EventBridgePutEvents
             }
         }
 
-        // All retries exhausted - log comprehensive error details
+        // All retries exhausted - log comprehensive error details (excluding sensitive event data)
         error_log(sprintf(
-            '[EventBridge] FAILED after %d attempts - DetailType: %s, PostID: %s, LastError: %s, LastResponseCode: %s, Region: %s, EventBus: %s, Timestamp: %s, EventDetails: %s',
+            '[EventBridge] FAILED after %d attempts - DetailType: %s, PostID: %s, LastError: %s, LastResponseCode: %s, Region: %s, EventBus: %s, Timestamp: %s',
             $maxRetries + 1,
             $detailType,
             $postId,
@@ -261,8 +261,7 @@ class EventBridgePutEvents
             $lastResponseCode,
             $this->region,
             EVENT_BUS_NAME,
-            $timestamp,
-            json_encode($detail)
+            $timestamp
         ));
 
         return false; // Failure
@@ -300,6 +299,9 @@ class EventBridgePostEvents
 
         // 非同期EventBridge送信のアクションフック
         add_action('eventbridge_async_send_event', array($this, 'async_send_event'), 10, 3);
+
+        // EventBridge送信失敗時のハンドラー
+        add_action('eventbridge_send_failed', array($this, 'handle_send_failure'), 10, 3);
     }
 
     /**
@@ -371,11 +373,40 @@ class EventBridgePostEvents
      * @param string $source イベントソース
      * @param string $detailType イベント詳細タイプ
      * @param array $detail イベント詳細データ
+     * @return bool 送信成功時true、失敗時false
      */
     public function async_send_event($source, $detailType, $detail)
     {
         // バックグラウンドでEventBridge API呼び出し（リトライ処理含む）
-        $this->client->sendEvent($source, $detailType, $detail);
+        $success = $this->client->sendEvent($source, $detailType, $detail);
+
+        if (!$success) {
+            // 監視・アラート・デッドレターキュー処理用のフック
+            do_action('eventbridge_send_failed', $source, $detailType, $detail);
+        }
+
+        return $success;
+    }
+
+    /**
+     * EventBridge送信失敗時のハンドラー
+     *
+     * @param string $source イベントソース
+     * @param string $detailType イベント詳細タイプ
+     * @param array $detail イベント詳細データ
+     */
+    public function handle_send_failure($source, $detailType, $detail)
+    {
+        $postId = isset($detail['id']) ? $detail['id'] : null;
+        if ($postId) {
+            // 失敗イベントをログに記録（監視・アラート用）
+            error_log(sprintf(
+                '[EventBridge] Failed to send event after all retries: DetailType=%s, PostID=%s, Source=%s',
+                $detailType,
+                $postId,
+                $source
+            ));
+        }
     }
 
     /**
