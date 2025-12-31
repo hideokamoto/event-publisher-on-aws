@@ -424,12 +424,55 @@ class EventBridgePostEvents
         $body = wp_remote_retrieve_body($response);
         return json_decode($body, true);
     }
-    
+
     /**
-     * 投稿のイベントをEventBridgeに送信する（非同期スケジュール）
+     * イベントエンベロープを作成する
      *
-     * @param string $new_status 新しいステータス
-     * @param string $old_status 古いステータス
+     * @param array $data イベントデータ
+     * @param string $correlation_id コリレーションID
+     * @return array イベントエンベロープ
+     */
+    private function create_event_envelope($data, $correlation_id)
+    {
+        return array(
+            'event_id' => wp_generate_uuid4(),
+            'event_timestamp' => current_time('c'), // ISO 8601 format
+            'event_version' => '1.0',
+            'source_system' => get_bloginfo('url'),
+            'correlation_id' => $correlation_id,
+            'data' => $data
+        );
+    }
+
+    /**
+     * コリレーションIDを取得または生成する
+     *
+     * @param int $post_id 投稿ID
+     * @return string コリレーションID
+     */
+    private function get_or_create_correlation_id($post_id)
+    {
+        $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
+
+        if (empty($correlation_id)) {
+            $correlation_id = wp_generate_uuid4();
+            $added = add_post_meta($post_id, '_event_correlation_id', $correlation_id, true);
+
+            // If add_post_meta returned false, another request wrote the meta first
+            // Re-read the actual value that was stored
+            if ($added === false) {
+                $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
+            }
+        }
+
+        return $correlation_id;
+    }
+
+    /**
+     * 投稿のイベントをEventBridgeに送信する（非同期スケジュール + エンベロープ）
+     *
+     * @param string $new_status 新しい投稿ステータス
+     * @param string $old_status 前の投稿ステータス
      * @param WP_Post $post 投稿オブジェクト
      */
     public function send_post_event($new_status, $old_status, $post)
@@ -437,10 +480,18 @@ class EventBridgePostEvents
         if ($new_status !== 'publish') {
             return;
         }
-        $event_name = $new_status === $old_status ? 'post.updated' :'post.' . $new_status . 'ed'; // post.published、post.drafted など
+
+        $event_name = $new_status === $old_status ? 'post.updated' : 'post.' . $new_status . 'ed'; // post.published、post.drafted など
         $permalink = get_permalink($post->ID);
         $post_type = $post->post_type;
-        $api_url = get_rest_url(null, 'wp/v2/' . $post_type . 's/' . $post->ID);
+
+        // Get REST API URL using rest_base from post type object
+        $post_type_obj = get_post_type_object($post_type);
+        $rest_base = !empty($post_type_obj->rest_base) ? $post_type_obj->rest_base : $post_type;
+        $api_url = get_rest_url(null, 'wp/v2/' . $rest_base . '/' . $post->ID);
+
+        // Get or create correlation_id
+        $correlation_id = $this->get_or_create_correlation_id($post->ID);
 
         $event_data = array(
             'id' => (string)$post->ID,
@@ -453,24 +504,34 @@ class EventBridgePostEvents
             'previous_status' => $old_status
         );
 
+        // Create event envelope
+        $event_envelope = $this->create_event_envelope($event_data, $correlation_id);
+
         // 非同期でEventBridgeに送信（UIをブロックしない）
-        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_data));
+        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_envelope));
     }
 
     /**
-     * 投稿削除のイベントをEventBridgeに送信する（非同期スケジュール）
+     * 投稿削除のイベントをEventBridgeに送信する（非同期スケジュール + エンベロープ）
      *
      * @param int $post_id 投稿ID
      */
     public function send_delete_post_event($post_id)
     {
         $event_name = 'post.deleted';
+
+        // Get correlation_id (or generate new one if not found - edge case)
+        $correlation_id = $this->get_or_create_correlation_id($post_id);
+
         $event_data = array(
             'id' => (string)$post_id
         );
 
+        // Create event envelope
+        $event_envelope = $this->create_event_envelope($event_data, $correlation_id);
+
         // 非同期でEventBridgeに送信（UIをブロックしない）
-        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_data));
+        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_envelope));
     }
 
     /**
@@ -534,6 +595,129 @@ class EventBridgePostEvents
 
         // 非同期でEventBridgeに送信（UIをブロックしない）
         wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_data));
+    }
+
+    /**
+     * Display admin notice when failure count exceeds threshold
+     */
+    public function display_failure_notice()
+    {
+        // Only show to administrators
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        // Check if notice was dismissed
+        if (get_transient(self::TRANSIENT_NOTICE_DISMISSED)) {
+            return;
+        }
+
+        // Check if failure count exceeds threshold
+        $failure_count = $this->failed_events;
+        if ($failure_count < self::FAILURE_THRESHOLD) {
+            return;
+        }
+
+        // Get failure details from consolidated option
+        $failure_details = get_option(self::OPTION_FAILURE_DETAILS, array(
+            'last_failure_time' => 'Unknown',
+            'messages' => array()
+        ));
+
+        $last_failure_time = $failure_details['last_failure_time'] ?: 'Unknown';
+        $failure_messages = $failure_details['messages'];
+        $success_count = $this->successful_events;
+
+        // Get most recent error message using array indexing (safer than end())
+        $recent_error = 'Unknown error';
+        if (!empty($failure_messages)) {
+            $last_index = count($failure_messages) - 1;
+            $recent_error = isset($failure_messages[$last_index]['message'])
+                ? $failure_messages[$last_index]['message']
+                : 'Unknown error';
+        }
+
+        // Create dismiss URL
+        $dismiss_url = add_query_arg(array(
+            'eventbridge_dismiss_notice' => '1',
+            'eventbridge_nonce' => wp_create_nonce('eventbridge_dismiss_notice')
+        ));
+
+        // Display the notice
+        ?>
+        <div class="notice notice-error is-dismissible">
+            <h3><?php esc_html_e('EventBridge Publishing Failures Detected', 'eventbridge-post-events'); ?></h3>
+            <p><strong><?php esc_html_e('Action Required:', 'eventbridge-post-events'); ?></strong> <?php esc_html_e('EventBridge event publishing is experiencing failures.', 'eventbridge-post-events'); ?></p>
+            <ul>
+                <li><strong><?php esc_html_e('Failed Events:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($failure_count); ?></li>
+                <li><strong><?php esc_html_e('Successful Events:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($success_count); ?></li>
+                <li><strong><?php esc_html_e('Last Failure:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($last_failure_time); ?></li>
+                <li><strong><?php esc_html_e('Recent Error:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($recent_error); ?></li>
+            </ul>
+            <p>
+                <strong><?php esc_html_e('Recommended Actions:', 'eventbridge-post-events'); ?></strong>
+            </p>
+            <ol>
+                <li><?php esc_html_e('Check your AWS EventBridge credentials (AWS_EVENTBRIDGE_ACCESS_KEY_ID and AWS_EVENTBRIDGE_SECRET_ACCESS_KEY)', 'eventbridge-post-events'); ?></li>
+                <li><?php printf(esc_html__('Verify EventBridge event bus "%s" exists in region "%s"', 'eventbridge-post-events'), esc_html(EVENT_BUS_NAME), esc_html($this->region)); ?></li>
+                <li>
+                    <?php
+                    // Check for known error log plugins before displaying link
+                    if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                        $log_path = defined('WP_DEBUG_LOG') && is_string(WP_DEBUG_LOG) ? WP_DEBUG_LOG : WP_CONTENT_DIR . '/debug.log';
+                        printf(
+                            esc_html__('Check error logs at %s or enable WP_DEBUG_LOG in wp-config.php', 'eventbridge-post-events'),
+                            '<code>' . esc_html($log_path) . '</code>'
+                        );
+                    } else {
+                        esc_html_e('Enable WP_DEBUG_LOG in wp-config.php and check wp-content/debug.log for error details', 'eventbridge-post-events');
+                    }
+                    ?>
+                </li>
+                <li><?php esc_html_e('Ensure IAM permissions include "events:PutEvents" for the event bus', 'eventbridge-post-events'); ?></li>
+            </ol>
+            <p>
+                <a href="<?php echo esc_url($dismiss_url); ?>" class="button button-primary"><?php esc_html_e('Dismiss for 24 hours', 'eventbridge-post-events'); ?></a>
+            </p>
+        </div>
+        <?php
+    }
+
+    /**
+     * Handle admin notice dismissal
+     */
+    public function handle_notice_dismissal()
+    {
+        // Check if dismiss action was triggered
+        if (!isset($_GET['eventbridge_dismiss_notice'])) {
+            return;
+        }
+
+        // Sanitize and unslash nonce before verification
+        if (!isset($_GET['eventbridge_nonce'])) {
+            return;
+        }
+
+        $nonce = sanitize_text_field(wp_unslash($_GET['eventbridge_nonce']));
+        if (!wp_verify_nonce($nonce, 'eventbridge_dismiss_notice')) {
+            return;
+        }
+
+        // Only allow administrators
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        // Set transient to dismiss notice for 24 hours
+        set_transient(self::TRANSIENT_NOTICE_DISMISSED, true, 24 * HOUR_IN_SECONDS);
+
+        // Reset failure counter to prevent alert fatigue
+        $this->failed_events = 0;
+        $this->save_metrics();
+
+        // Safely redirect to remove query parameters
+        wp_safe_redirect(remove_query_arg(array('eventbridge_dismiss_notice', 'eventbridge_nonce')));
+        exit;
     }
 
     /**
