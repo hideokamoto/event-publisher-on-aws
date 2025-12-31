@@ -94,7 +94,7 @@ class EventBridgePutEvents
 
             // Check for failures in the response
             if ($statusCode === 200 && isset($data['FailedEntryCount']) && $data['FailedEntryCount'] === 0) {
-                return array('success' => true, 'response' => $data);
+                return array('success' => true, 'error' => null, 'response' => $data);
             } else {
                 $errorMessage = isset($data['Entries'][0]['ErrorMessage']) ? $data['Entries'][0]['ErrorMessage'] : 'Unknown error';
                 error_log('EventBridge Failed: ' . $errorMessage);
@@ -103,7 +103,7 @@ class EventBridgePutEvents
         } else {
             $errorMessage = $response->get_error_message();
             error_log('EventBridge Error: ' . $errorMessage);
-            return array('success' => false, 'error' => $errorMessage);
+            return array('success' => false, 'error' => $errorMessage, 'response' => null);
         }
     }
 
@@ -129,11 +129,9 @@ class EventBridgePostEvents
     private $successful_events = 0;
     private $failed_events = 0;
 
-    // WordPress options keys for persistent storage
-    const OPTION_SUCCESS_COUNT = 'eventbridge_success_count';
-    const OPTION_FAILURE_COUNT = 'eventbridge_failure_count';
-    const OPTION_LAST_FAILURE_TIME = 'eventbridge_last_failure_time';
-    const OPTION_FAILURE_MESSAGES = 'eventbridge_failure_messages';
+    // WordPress options keys for persistent storage (non-autoload for performance)
+    const OPTION_METRICS = 'eventbridge_metrics';
+    const OPTION_FAILURE_DETAILS = 'eventbridge_failure_details';
     const TRANSIENT_NOTICE_DISMISSED = 'eventbridge_notice_dismissed';
     const FAILURE_THRESHOLD = 5; // Number of failures before showing admin notice
 
@@ -164,17 +162,26 @@ class EventBridgePostEvents
      */
     private function load_metrics()
     {
-        $this->successful_events = (int) get_option(self::OPTION_SUCCESS_COUNT, 0);
-        $this->failed_events = (int) get_option(self::OPTION_FAILURE_COUNT, 0);
+        $metrics = get_option(self::OPTION_METRICS, array(
+            'successful_events' => 0,
+            'failed_events' => 0
+        ));
+
+        $this->successful_events = (int) $metrics['successful_events'];
+        $this->failed_events = (int) $metrics['failed_events'];
     }
 
     /**
      * Save metrics to WordPress options table
+     * Uses single serialized option with autoload=false for performance
      */
     private function save_metrics()
     {
-        update_option(self::OPTION_SUCCESS_COUNT, $this->successful_events);
-        update_option(self::OPTION_FAILURE_COUNT, $this->failed_events);
+        $metrics = array(
+            'successful_events' => $this->successful_events,
+            'failed_events' => $this->failed_events
+        );
+        update_option(self::OPTION_METRICS, $metrics, false);
     }
 
     /**
@@ -188,28 +195,51 @@ class EventBridgePostEvents
 
     /**
      * Record a failed event
+     * Consolidates DB writes to reduce I/O and race conditions
      *
      * @param string $error_message The error message
      */
     private function record_failure($error_message)
     {
+        // Increment in-memory counter
         $this->failed_events++;
-        update_option(self::OPTION_LAST_FAILURE_TIME, current_time('mysql'));
 
-        // Store recent failure messages (keep last 10)
-        $failure_messages = get_option(self::OPTION_FAILURE_MESSAGES, array());
-        $failure_messages[] = array(
+        // Read, mutate, and write failure details in one operation
+        $failure_details = get_option(self::OPTION_FAILURE_DETAILS, array(
+            'last_failure_time' => null,
+            'messages' => array()
+        ));
+
+        $failure_details['last_failure_time'] = current_time('mysql');
+        $failure_details['messages'][] = array(
             'time' => current_time('mysql'),
             'message' => $error_message
         );
 
         // Keep only the last 10 failure messages
-        if (count($failure_messages) > 10) {
-            $failure_messages = array_slice($failure_messages, -10);
+        if (count($failure_details['messages']) > 10) {
+            $failure_details['messages'] = array_slice($failure_details['messages'], -10);
         }
 
-        update_option(self::OPTION_FAILURE_MESSAGES, $failure_messages);
+        // Two DB writes total: one for metrics, one for failure details
+        update_option(self::OPTION_FAILURE_DETAILS, $failure_details, false);
         $this->save_metrics();
+    }
+
+    /**
+     * Track event result and update metrics
+     * Consolidates duplicated logic from send_post_event and send_delete_post_event
+     *
+     * @param array $result The result array from sendEvent()
+     */
+    private function track_event_result($result)
+    {
+        if ($result['success']) {
+            $this->record_success();
+        } else {
+            $error_message = isset($result['error']) ? $result['error'] : 'Unknown error';
+            $this->record_failure($error_message);
+        }
     }
 
     /**
@@ -256,14 +286,7 @@ class EventBridgePostEvents
         );
 
 		$result = $this->client->sendEvent(EVENT_SOURCE_NAME, $event_name, $event_data);
-
-        // Track metrics based on result
-        if ($result['success']) {
-            $this->record_success();
-        } else {
-            $error_message = isset($result['error']) ? $result['error'] : 'Unknown error';
-            $this->record_failure($error_message);
-        }
+        $this->track_event_result($result);
     }
 
     /**
@@ -278,14 +301,7 @@ class EventBridgePostEvents
             'id' => (string)$post_id
         );
 		$result = $this->client->sendEvent(EVENT_SOURCE_NAME, $event_name, $event_data);
-
-        // Track metrics based on result
-        if ($result['success']) {
-            $this->record_success();
-        } else {
-            $error_message = isset($result['error']) ? $result['error'] : 'Unknown error';
-            $this->record_failure($error_message);
-        }
+        $this->track_event_result($result);
     }
 
     /**
@@ -326,16 +342,23 @@ class EventBridgePostEvents
             return;
         }
 
-        // Get failure details
-        $last_failure_time = get_option(self::OPTION_LAST_FAILURE_TIME, 'Unknown');
-        $failure_messages = get_option(self::OPTION_FAILURE_MESSAGES, array());
+        // Get failure details from consolidated option
+        $failure_details = get_option(self::OPTION_FAILURE_DETAILS, array(
+            'last_failure_time' => 'Unknown',
+            'messages' => array()
+        ));
+
+        $last_failure_time = $failure_details['last_failure_time'] ?: 'Unknown';
+        $failure_messages = $failure_details['messages'];
         $success_count = $this->successful_events;
 
-        // Get most recent error message
+        // Get most recent error message using array indexing (safer than end())
         $recent_error = 'Unknown error';
         if (!empty($failure_messages)) {
-            $last_message = end($failure_messages);
-            $recent_error = $last_message['message'];
+            $last_index = count($failure_messages) - 1;
+            $recent_error = isset($failure_messages[$last_index]['message'])
+                ? $failure_messages[$last_index]['message']
+                : 'Unknown error';
         }
 
         // Create dismiss URL
@@ -347,25 +370,38 @@ class EventBridgePostEvents
         // Display the notice
         ?>
         <div class="notice notice-error is-dismissible">
-            <h3>EventBridge Publishing Failures Detected</h3>
-            <p><strong>Action Required:</strong> EventBridge event publishing is experiencing failures.</p>
+            <h3><?php esc_html_e('EventBridge Publishing Failures Detected', 'eventbridge-post-events'); ?></h3>
+            <p><strong><?php esc_html_e('Action Required:', 'eventbridge-post-events'); ?></strong> <?php esc_html_e('EventBridge event publishing is experiencing failures.', 'eventbridge-post-events'); ?></p>
             <ul>
-                <li><strong>Failed Events:</strong> <?php echo esc_html($failure_count); ?></li>
-                <li><strong>Successful Events:</strong> <?php echo esc_html($success_count); ?></li>
-                <li><strong>Last Failure:</strong> <?php echo esc_html($last_failure_time); ?></li>
-                <li><strong>Recent Error:</strong> <?php echo esc_html($recent_error); ?></li>
+                <li><strong><?php esc_html_e('Failed Events:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($failure_count); ?></li>
+                <li><strong><?php esc_html_e('Successful Events:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($success_count); ?></li>
+                <li><strong><?php esc_html_e('Last Failure:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($last_failure_time); ?></li>
+                <li><strong><?php esc_html_e('Recent Error:', 'eventbridge-post-events'); ?></strong> <?php echo esc_html($recent_error); ?></li>
             </ul>
             <p>
-                <strong>Recommended Actions:</strong>
+                <strong><?php esc_html_e('Recommended Actions:', 'eventbridge-post-events'); ?></strong>
             </p>
             <ol>
-                <li>Check your AWS EventBridge credentials (AWS_EVENTBRIDGE_ACCESS_KEY_ID and AWS_EVENTBRIDGE_SECRET_ACCESS_KEY)</li>
-                <li>Verify EventBridge event bus "<?php echo esc_html(EVENT_BUS_NAME); ?>" exists in region "<?php echo esc_html($this->region); ?>"</li>
-                <li>Review error logs: <a href="<?php echo esc_url(admin_url('tools.php?page=error-log')); ?>">View Error Log</a></li>
-                <li>Ensure IAM permissions include "events:PutEvents" for the event bus</li>
+                <li><?php esc_html_e('Check your AWS EventBridge credentials (AWS_EVENTBRIDGE_ACCESS_KEY_ID and AWS_EVENTBRIDGE_SECRET_ACCESS_KEY)', 'eventbridge-post-events'); ?></li>
+                <li><?php printf(esc_html__('Verify EventBridge event bus "%s" exists in region "%s"', 'eventbridge-post-events'), esc_html(EVENT_BUS_NAME), esc_html($this->region)); ?></li>
+                <li>
+                    <?php
+                    // Check for known error log plugins before displaying link
+                    if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                        $log_path = defined('WP_DEBUG_LOG') && is_string(WP_DEBUG_LOG) ? WP_DEBUG_LOG : WP_CONTENT_DIR . '/debug.log';
+                        printf(
+                            esc_html__('Check error logs at %s or enable WP_DEBUG_LOG in wp-config.php', 'eventbridge-post-events'),
+                            '<code>' . esc_html($log_path) . '</code>'
+                        );
+                    } else {
+                        esc_html_e('Enable WP_DEBUG_LOG in wp-config.php and check wp-content/debug.log for error details', 'eventbridge-post-events');
+                    }
+                    ?>
+                </li>
+                <li><?php esc_html_e('Ensure IAM permissions include "events:PutEvents" for the event bus', 'eventbridge-post-events'); ?></li>
             </ol>
             <p>
-                <a href="<?php echo esc_url($dismiss_url); ?>" class="button button-primary">Dismiss for 24 hours</a>
+                <a href="<?php echo esc_url($dismiss_url); ?>" class="button button-primary"><?php esc_html_e('Dismiss for 24 hours', 'eventbridge-post-events'); ?></a>
             </p>
         </div>
         <?php
@@ -396,7 +432,7 @@ class EventBridgePostEvents
 
         // Reset failure counter to prevent alert fatigue
         $this->failed_events = 0;
-        update_option(self::OPTION_FAILURE_COUNT, 0);
+        $this->save_metrics();
 
         // Redirect to remove query parameters
         wp_redirect(remove_query_arg(array('eventbridge_dismiss_notice', 'eventbridge_nonce')));
