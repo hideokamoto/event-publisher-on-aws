@@ -299,8 +299,8 @@ class EventBridgePostEvents
 
     public function __construct()
     {
-        // AWS認証情報の検証
-        if (!defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') || !defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY')) {
+        // AWS認証情報の検証（定義されていて、空の値ではないか確認）
+        if (empty(constant('AWS_EVENTBRIDGE_ACCESS_KEY_ID')) || empty(constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY'))) {
             add_action('admin_notices', function() {
                 ?>
                 <div class="notice notice-error">
