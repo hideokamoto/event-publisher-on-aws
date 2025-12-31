@@ -86,13 +86,16 @@ class EventBridgePutEvents
         $lastResponseCode = null;
         $timestamp = date('Y-m-d H:i:s');
 
+        // Check if verbose logging is enabled (DRY principle)
+        $verboseLogging = defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG;
+
         // Extract post ID from detail if available
         $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
 
         // Retry loop with exponential backoff
         for ($attempt = 0; $attempt <= $maxRetries; $attempt++) {
             // Verbose logging for debugging
-            if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+            if ($verboseLogging) {
                 error_log(sprintf(
                     '[EventBridge] Attempt %d/%d - Sending event: DetailType=%s, PostID=%s, Region=%s, EventBus=%s, Timestamp=%s',
                     $attempt + 1,
@@ -117,7 +120,7 @@ class EventBridgePutEvents
                 $lastResponseCode = 'WP_Error';
 
                 // Verbose logging for WP_Error
-                if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                if ($verboseLogging) {
                     error_log(sprintf(
                         '[EventBridge] WP_Error on attempt %d: %s',
                         $attempt + 1,
@@ -133,16 +136,16 @@ class EventBridgePutEvents
                 }
             } else {
                 // Check HTTP status code
-                $statusCode = wp_remote_retrieve_response_code($response);
+                $statusCode = (int)wp_remote_retrieve_response_code($response);
                 $lastResponseCode = $statusCode;
                 $responseBody = wp_remote_retrieve_body($response);
 
-                // Check if HTTP status code indicates an error
-                if (wp_is_http_error($response)) {
+                // Check if HTTP status code indicates an error (>= 400)
+                if ($statusCode >= 400) {
                     $lastError = sprintf('HTTP %d: %s', $statusCode, $responseBody);
 
                     // Verbose logging for HTTP errors
-                    if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                    if ($verboseLogging) {
                         error_log(sprintf(
                             '[EventBridge] HTTP error on attempt %d: Status=%d, Body=%s',
                             $attempt + 1,
@@ -151,27 +154,12 @@ class EventBridgePutEvents
                         ));
                     }
 
-                    // Determine if error is retryable
-                    $isRetryable = false;
-
-                    // 5xx server errors are retryable
-                    if ($statusCode >= 500 && $statusCode < 600) {
-                        $isRetryable = true;
-                    }
-
-                    // 429 Too Many Requests is retryable
-                    if ($statusCode === 429) {
-                        $isRetryable = true;
-                    }
-
-                    // 4xx client errors (except 429) are NOT retryable
-                    if ($statusCode >= 400 && $statusCode < 500 && $statusCode !== 429) {
-                        $isRetryable = false;
-                    }
+                    // Determine if error is retryable (simplified logic)
+                    $isRetryable = ($statusCode >= 500 && $statusCode < 600) || $statusCode === 429;
 
                     // Retry if error is retryable and we haven't exceeded max retries
                     if ($isRetryable && $attempt < $maxRetries) {
-                        if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                        if ($verboseLogging) {
                             error_log(sprintf(
                                 '[EventBridge] Retryable error detected. Waiting %d seconds before retry...',
                                 $retryDelay
@@ -182,7 +170,7 @@ class EventBridgePutEvents
                         continue;
                     } elseif (!$isRetryable) {
                         // Permanent failure - don't retry
-                        if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                        if ($verboseLogging) {
                             error_log(sprintf(
                                 '[EventBridge] Permanent failure detected (HTTP %d). Not retrying.',
                                 $statusCode
@@ -194,8 +182,62 @@ class EventBridgePutEvents
                     // Success - status code is 2xx
                     $data = json_decode($responseBody, true);
 
-                    // Verbose logging for success
-                    if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                    // Check for partial failures in PutEvents response
+                    $failedCount = isset($data['FailedEntryCount']) ? (int)$data['FailedEntryCount'] : 0;
+
+                    if ($failedCount > 0) {
+                        // Partial failure detected
+                        $failureDetails = array();
+                        if (isset($data['Entries']) && is_array($data['Entries'])) {
+                            foreach ($data['Entries'] as $index => $entry) {
+                                if (isset($entry['ErrorCode'])) {
+                                    $failureDetails[] = sprintf(
+                                        'Entry[%d]: ErrorCode=%s, ErrorMessage=%s',
+                                        $index,
+                                        $entry['ErrorCode'],
+                                        isset($entry['ErrorMessage']) ? $entry['ErrorMessage'] : 'N/A'
+                                    );
+                                }
+                            }
+                        }
+
+                        $lastError = sprintf(
+                            'Partial failure: %d/%d entries failed. Details: %s',
+                            $failedCount,
+                            count($data['Entries']),
+                            implode('; ', $failureDetails)
+                        );
+                        $lastResponseCode = 'PartialFailure';
+
+                        // Verbose logging for partial failure
+                        if ($verboseLogging) {
+                            error_log(sprintf(
+                                '[EventBridge] Partial failure on attempt %d: FailedEntryCount=%d, Response=%s',
+                                $attempt + 1,
+                                $failedCount,
+                                print_r($data, true)
+                            ));
+                        }
+
+                        // Retry partial failures if retries remain
+                        if ($attempt < $maxRetries) {
+                            if ($verboseLogging) {
+                                error_log(sprintf(
+                                    '[EventBridge] Retrying partial failure. Waiting %d seconds...',
+                                    $retryDelay
+                                ));
+                            }
+                            sleep($retryDelay);
+                            $retryDelay *= 2; // Exponential backoff
+                            continue;
+                        }
+
+                        // No more retries - break and log final error
+                        break;
+                    }
+
+                    // Complete success - all entries processed
+                    if ($verboseLogging) {
                         error_log(sprintf(
                             '[EventBridge] Success on attempt %d: Status=%d, Response=%s',
                             $attempt + 1,
@@ -255,6 +297,9 @@ class EventBridgePostEvents
 
         // 投稿を削除した際のアクション
         add_action('before_delete_post', array($this, 'send_delete_post_event'), 10, 1);
+
+        // 非同期EventBridge送信のアクションフック
+        add_action('eventbridge_async_send_event', array($this, 'async_send_event'), 10, 3);
     }
 
     /**
@@ -273,21 +318,21 @@ class EventBridgePostEvents
     }
     
     /**
-     * 投稿のイベントをEventBridgeに送信する
+     * 投稿のイベントをEventBridgeに送信する（非同期スケジュール）
      *
-     * @param int $post_id 投稿ID
-     * @param WP_Post $post 投稿オブジェクト (新規公開の場合)
-     * @param WP_Post $post_before 更新前の投稿オブジェクト (更新の場合)
+     * @param string $new_status 新しいステータス
+     * @param string $old_status 古いステータス
+     * @param WP_Post $post 投稿オブジェクト
      */
     public function send_post_event($new_status, $old_status, $post)
-    {		
+    {
         if ($new_status !== 'publish') {
             return;
         }
         $event_name = $new_status === $old_status ? 'post.updated' :'post.' . $new_status . 'ed'; // post.published、post.drafted など
         $permalink = get_permalink($post->ID);
         $post_type = $post->post_type;
-        $api_url = get_rest_url(null, 'wp/v2/' . $post_type . 's/' . $post_id);
+        $api_url = get_rest_url(null, 'wp/v2/' . $post_type . 's/' . $post->ID);
 
         $event_data = array(
             'id' => (string)$post->ID,
@@ -300,11 +345,12 @@ class EventBridgePostEvents
             'previous_status' => $old_status
         );
 
-		$this->client->sendEvent(EVENT_SOURCE_NAME, $event_name, $event_data);
+        // 非同期でEventBridgeに送信（UIをブロックしない）
+        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_data));
     }
 
     /**
-     * 投稿削除のイベントをEventBridgeに送信する
+     * 投稿削除のイベントをEventBridgeに送信する（非同期スケジュール）
      *
      * @param int $post_id 投稿ID
      */
@@ -314,11 +360,26 @@ class EventBridgePostEvents
         $event_data = array(
             'id' => (string)$post_id
         );
-		$this->client->sendEvent(EVENT_SOURCE_NAME, $event_name, $event_data);
+
+        // 非同期でEventBridgeに送信（UIをブロックしない）
+        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_data));
     }
 
     /**
-     * 失敗イベントをEventBridgeに送信する
+     * 非同期でEventBridgeにイベントを送信する（バックグラウンド処理）
+     *
+     * @param string $source イベントソース
+     * @param string $detailType イベント詳細タイプ
+     * @param array $detail イベント詳細データ
+     */
+    public function async_send_event($source, $detailType, $detail)
+    {
+        // バックグラウンドでEventBridge API呼び出し（リトライ処理含む）
+        $this->client->sendEvent($source, $detailType, $detail);
+    }
+
+    /**
+     * 失敗イベントをEventBridgeに送信する（非同期スケジュール）
      *
      * @param string $event_name 失敗したイベント名
      * @param int $post_id 投稿ID
@@ -331,7 +392,8 @@ class EventBridgePostEvents
             'failed_event' => $event_name
         );
 
-		$this->client->sendEvent(EVENT_SOURCE_NAME, $event_name, $event_data);
+        // 非同期でEventBridgeに送信（UIをブロックしない）
+        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_data));
     }
 }
 
