@@ -79,19 +79,151 @@ class EventBridgePutEvents
             'Authorization' => $authorizationHeader,
         );
 
-        $response = wp_remote_request("https://{$this->endpoint}{$path}", array(
-            'method' => $method,
-            'headers' => $headers,
-            'body' => $payload,
+        // Retry configuration
+        $maxRetries = 3;
+        $retryDelay = 1; // Initial delay in seconds
+        $lastError = null;
+        $lastResponseCode = null;
+        $timestamp = date('Y-m-d H:i:s');
+
+        // Extract post ID from detail if available
+        $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
+
+        // Retry loop with exponential backoff
+        for ($attempt = 0; $attempt <= $maxRetries; $attempt++) {
+            // Verbose logging for debugging
+            if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                error_log(sprintf(
+                    '[EventBridge] Attempt %d/%d - Sending event: DetailType=%s, PostID=%s, Region=%s, EventBus=%s, Timestamp=%s',
+                    $attempt + 1,
+                    $maxRetries + 1,
+                    $detailType,
+                    $postId,
+                    $this->region,
+                    EVENT_BUS_NAME,
+                    $timestamp
+                ));
+            }
+
+            $response = wp_remote_request("https://{$this->endpoint}{$path}", array(
+                'method' => $method,
+                'headers' => $headers,
+                'body' => $payload,
+            ));
+
+            // Check if wp_remote_request returned a WP_Error
+            if (is_wp_error($response)) {
+                $lastError = $response->get_error_message();
+                $lastResponseCode = 'WP_Error';
+
+                // Verbose logging for WP_Error
+                if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                    error_log(sprintf(
+                        '[EventBridge] WP_Error on attempt %d: %s',
+                        $attempt + 1,
+                        $lastError
+                    ));
+                }
+
+                // Retry on WP_Error (network issues, etc.)
+                if ($attempt < $maxRetries) {
+                    sleep($retryDelay);
+                    $retryDelay *= 2; // Exponential backoff
+                    continue;
+                }
+            } else {
+                // Check HTTP status code
+                $statusCode = wp_remote_retrieve_response_code($response);
+                $lastResponseCode = $statusCode;
+                $responseBody = wp_remote_retrieve_body($response);
+
+                // Check if HTTP status code indicates an error
+                if (wp_is_http_error($response)) {
+                    $lastError = sprintf('HTTP %d: %s', $statusCode, $responseBody);
+
+                    // Verbose logging for HTTP errors
+                    if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                        error_log(sprintf(
+                            '[EventBridge] HTTP error on attempt %d: Status=%d, Body=%s',
+                            $attempt + 1,
+                            $statusCode,
+                            $responseBody
+                        ));
+                    }
+
+                    // Determine if error is retryable
+                    $isRetryable = false;
+
+                    // 5xx server errors are retryable
+                    if ($statusCode >= 500 && $statusCode < 600) {
+                        $isRetryable = true;
+                    }
+
+                    // 429 Too Many Requests is retryable
+                    if ($statusCode === 429) {
+                        $isRetryable = true;
+                    }
+
+                    // 4xx client errors (except 429) are NOT retryable
+                    if ($statusCode >= 400 && $statusCode < 500 && $statusCode !== 429) {
+                        $isRetryable = false;
+                    }
+
+                    // Retry if error is retryable and we haven't exceeded max retries
+                    if ($isRetryable && $attempt < $maxRetries) {
+                        if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                            error_log(sprintf(
+                                '[EventBridge] Retryable error detected. Waiting %d seconds before retry...',
+                                $retryDelay
+                            ));
+                        }
+                        sleep($retryDelay);
+                        $retryDelay *= 2; // Exponential backoff
+                        continue;
+                    } elseif (!$isRetryable) {
+                        // Permanent failure - don't retry
+                        if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                            error_log(sprintf(
+                                '[EventBridge] Permanent failure detected (HTTP %d). Not retrying.',
+                                $statusCode
+                            ));
+                        }
+                        break;
+                    }
+                } else {
+                    // Success - status code is 2xx
+                    $data = json_decode($responseBody, true);
+
+                    // Verbose logging for success
+                    if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+                        error_log(sprintf(
+                            '[EventBridge] Success on attempt %d: Status=%d, Response=%s',
+                            $attempt + 1,
+                            $statusCode,
+                            print_r($data, true)
+                        ));
+                    }
+
+                    return true; // Success
+                }
+            }
+        }
+
+        // All retries exhausted - log comprehensive error details
+        error_log(sprintf(
+            '[EventBridge] FAILED after %d attempts - DetailType: %s, PostID: %s, LastError: %s, LastResponseCode: %s, Region: %s, EventBus: %s, Timestamp: %s, EventDetails: %s',
+            $maxRetries + 1,
+            $detailType,
+            $postId,
+            $lastError,
+            $lastResponseCode,
+            $this->region,
+            EVENT_BUS_NAME,
+            $timestamp,
+            json_encode($detail)
         ));
 
-        if (!is_wp_error($response)) {
-            $responseBody = wp_remote_retrieve_body($response);
-            $data = json_decode($responseBody, true);
-            error_log('Response: ' . print_r($data, true));
-        } else {
-            error_log('Error: ' . $response->get_error_message());
-        }
+        return false; // Failure
     }
 
     private function getSignatureKey($dateStamp)
