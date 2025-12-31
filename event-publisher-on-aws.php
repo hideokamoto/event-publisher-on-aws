@@ -258,6 +258,49 @@ class EventBridgePostEvents
     }
     
     /**
+     * イベントエンベロープを作成する
+     *
+     * @param array $data イベントデータ
+     * @param string $correlation_id コリレーションID
+     * @return array イベントエンベロープ
+     */
+    private function create_event_envelope($data, $correlation_id)
+    {
+        return array(
+            'event_id' => wp_generate_uuid4(),
+            'event_timestamp' => current_time('c'), // ISO 8601 format
+            'event_version' => '1.0',
+            'source_system' => get_bloginfo('url'),
+            'correlation_id' => $correlation_id,
+            'data' => $data
+        );
+    }
+
+    /**
+     * コリレーションIDを取得または生成する
+     *
+     * @param int $post_id 投稿ID
+     * @return string コリレーションID
+     */
+    private function get_or_create_correlation_id($post_id)
+    {
+        $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
+
+        if (empty($correlation_id)) {
+            $correlation_id = wp_generate_uuid4();
+            $added = add_post_meta($post_id, '_event_correlation_id', $correlation_id, true);
+
+            // If add_post_meta returned false, another request wrote the meta first
+            // Re-read the actual value that was stored
+            if ($added === false) {
+                $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
+            }
+        }
+
+        return $correlation_id;
+    }
+
+    /**
      * 投稿のイベントをEventBridgeに送信する
      *
      * @param string $new_status 新しい投稿ステータス
@@ -269,10 +312,18 @@ class EventBridgePostEvents
         if ($new_status !== 'publish') {
             return;
         }
-        $event_name = $new_status === $old_status ? 'post.updated' :'post.' . $new_status . 'ed'; // post.published、post.drafted など
+
+        $event_name = $new_status === $old_status ? 'post.updated' : 'post.' . $new_status . 'ed'; // post.published、post.drafted など
         $permalink = get_permalink($post->ID);
         $post_type = $post->post_type;
-        $api_url = get_rest_url(null, 'wp/v2/' . $post_type . 's/' . $post->ID);
+
+        // Get REST API URL using rest_base from post type object
+        $post_type_obj = get_post_type_object($post_type);
+        $rest_base = !empty($post_type_obj->rest_base) ? $post_type_obj->rest_base : $post_type;
+        $api_url = get_rest_url(null, 'wp/v2/' . $rest_base . '/' . $post->ID);
+
+        // Get or create correlation_id
+        $correlation_id = $this->get_or_create_correlation_id($post->ID);
 
         $event_data = array(
             'id' => (string)$post->ID,
@@ -285,7 +336,10 @@ class EventBridgePostEvents
             'previous_status' => $old_status
         );
 
-		$result = $this->client->sendEvent(EVENT_SOURCE_NAME, $event_name, $event_data);
+        // Create event envelope
+        $event_envelope = $this->create_event_envelope($event_data, $correlation_id);
+
+		$result = $this->client->sendEvent(EVENT_SOURCE_NAME, $event_name, $event_envelope);
         $this->track_event_result($result);
     }
 
@@ -297,10 +351,18 @@ class EventBridgePostEvents
     public function send_delete_post_event($post_id)
     {
         $event_name = 'post.deleted';
+
+        // Get correlation_id (or generate new one if not found - edge case)
+        $correlation_id = $this->get_or_create_correlation_id($post_id);
+
         $event_data = array(
             'id' => (string)$post_id
         );
-		$result = $this->client->sendEvent(EVENT_SOURCE_NAME, $event_name, $event_data);
+
+        // Create event envelope
+        $event_envelope = $this->create_event_envelope($event_data, $correlation_id);
+
+		$result = $this->client->sendEvent(EVENT_SOURCE_NAME, $event_name, $event_envelope);
         $this->track_event_result($result);
     }
 
