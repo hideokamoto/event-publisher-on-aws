@@ -294,11 +294,26 @@ class EventBridgePostEvents
     // WordPress options keys for persistent storage (non-autoload for performance)
     const OPTION_METRICS = 'eventbridge_metrics';
     const OPTION_FAILURE_DETAILS = 'eventbridge_failure_details';
+    const OPTION_SETTINGS = 'eventbridge_settings';
     const TRANSIENT_NOTICE_DISMISSED = 'eventbridge_notice_dismissed';
     const FAILURE_THRESHOLD = 5; // Number of failures before showing admin notice
 
+    // Valid setting values
+    const VALID_EVENT_FORMATS = array('legacy', 'envelope');
+    const VALID_SEND_MODES = array('sync', 'async');
+
+    // Settings defaults
+    private $settings;
+
     public function __construct()
     {
+        // Load settings first
+        $this->load_settings();
+
+        // Settings page - always register regardless of credentials
+        add_action('admin_menu', array($this, 'add_settings_menu'));
+        add_action('admin_init', array($this, 'register_settings'));
+
         // AWS認証情報の検証（定義されていて、空の値ではないか確認）
         if (empty(constant('AWS_EVENTBRIDGE_ACCESS_KEY_ID')) || empty(constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY'))) {
             add_action('admin_notices', function() {
@@ -313,7 +328,7 @@ class EventBridgePostEvents
 
         $identity = $this->get_instance_identity();
         $this->region = $identity['region'];
-		$this->client = new EventBridgePutEvents(AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY, $this->region);
+        $this->client = new EventBridgePutEvents(AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY, $this->region);
 
         // Load metrics from WordPress options
         $this->load_metrics();
@@ -335,6 +350,220 @@ class EventBridgePostEvents
 
         // Handle notice dismissal
         add_action('admin_init', array($this, 'handle_notice_dismissal'));
+    }
+
+    /**
+     * Get default settings
+     *
+     * @return array Default settings
+     */
+    private function get_default_settings()
+    {
+        return array(
+            'event_format' => 'envelope', // 'legacy' or 'envelope'
+            'send_mode' => 'async',       // 'sync' or 'async'
+        );
+    }
+
+    /**
+     * Load settings from WordPress options
+     */
+    private function load_settings()
+    {
+        $this->settings = wp_parse_args(
+            get_option(self::OPTION_SETTINGS, array()),
+            $this->get_default_settings()
+        );
+    }
+
+    /**
+     * Get a specific setting value
+     *
+     * @param string $key Setting key
+     * @return mixed Setting value
+     */
+    public function get_setting($key)
+    {
+        return isset($this->settings[$key]) ? $this->settings[$key] : null;
+    }
+
+    /**
+     * Add settings menu to WordPress admin
+     */
+    public function add_settings_menu()
+    {
+        add_options_page(
+            __('EventBridge Settings', 'eventbridge-post-events'),
+            __('EventBridge', 'eventbridge-post-events'),
+            'manage_options',
+            'eventbridge-settings',
+            array($this, 'render_settings_page')
+        );
+    }
+
+    /**
+     * Register settings with WordPress Settings API
+     */
+    public function register_settings()
+    {
+        register_setting(
+            'eventbridge_settings_group',
+            self::OPTION_SETTINGS,
+            array($this, 'sanitize_settings')
+        );
+
+        add_settings_section(
+            'eventbridge_main_section',
+            __('イベント送信設定', 'eventbridge-post-events'),
+            array($this, 'render_section_description'),
+            'eventbridge-settings'
+        );
+
+        add_settings_field(
+            'event_format',
+            __('イベント形式', 'eventbridge-post-events'),
+            array($this, 'render_event_format_field'),
+            'eventbridge-settings',
+            'eventbridge_main_section'
+        );
+
+        add_settings_field(
+            'send_mode',
+            __('送信モード', 'eventbridge-post-events'),
+            array($this, 'render_send_mode_field'),
+            'eventbridge-settings',
+            'eventbridge_main_section'
+        );
+    }
+
+    /**
+     * Sanitize settings before saving
+     *
+     * @param array $input Raw input
+     * @return array Sanitized settings
+     */
+    public function sanitize_settings($input)
+    {
+        $sanitized = array();
+        $defaults = $this->get_default_settings();
+
+        // Sanitize event_format
+        $sanitized['event_format'] = isset($input['event_format']) && in_array($input['event_format'], self::VALID_EVENT_FORMATS, true)
+            ? $input['event_format']
+            : $defaults['event_format'];
+
+        // Sanitize send_mode
+        $sanitized['send_mode'] = isset($input['send_mode']) && in_array($input['send_mode'], self::VALID_SEND_MODES, true)
+            ? $input['send_mode']
+            : $defaults['send_mode'];
+
+        return $sanitized;
+    }
+
+    /**
+     * Render section description
+     */
+    public function render_section_description()
+    {
+        echo '<p>' . esc_html__('EventBridgeへのイベント送信方法を設定します。', 'eventbridge-post-events') . '</p>';
+    }
+
+    /**
+     * Render event format field
+     */
+    public function render_event_format_field()
+    {
+        $current = $this->get_setting('event_format');
+        ?>
+        <fieldset>
+            <label>
+                <input type="radio" name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[event_format]" value="legacy" <?php checked($current, 'legacy'); ?>>
+                <?php esc_html_e('レガシー形式（プロトタイプ互換）', 'eventbridge-post-events'); ?>
+            </label>
+            <p class="description"><?php esc_html_e('イベントデータをそのまま送信します。既存の受信側との互換性を維持します。', 'eventbridge-post-events'); ?></p>
+            <pre style="background:#f5f5f5;padding:10px;margin:5px 0 15px;font-size:12px;">{"id": "123", "title": "記事タイトル", ...}</pre>
+
+            <label>
+                <input type="radio" name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[event_format]" value="envelope" <?php checked($current, 'envelope'); ?>>
+                <?php esc_html_e('エンベロープ形式（推奨）', 'eventbridge-post-events'); ?>
+            </label>
+            <p class="description"><?php esc_html_e('イベントID、タイムスタンプ、コリレーションID等のメタデータを含めて送信します。', 'eventbridge-post-events'); ?></p>
+            <pre style="background:#f5f5f5;padding:10px;margin:5px 0;font-size:12px;">{"event_id": "uuid", "correlation_id": "uuid", "data": {"id": "123", ...}}</pre>
+        </fieldset>
+        <?php
+    }
+
+    /**
+     * Render send mode field
+     */
+    public function render_send_mode_field()
+    {
+        $current = $this->get_setting('send_mode');
+        ?>
+        <fieldset>
+            <label>
+                <input type="radio" name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[send_mode]" value="sync" <?php checked($current, 'sync'); ?>>
+                <?php esc_html_e('同期送信', 'eventbridge-post-events'); ?>
+            </label>
+            <p class="description"><?php esc_html_e('投稿の保存時に即座にEventBridgeへ送信します。送信完了まで画面がブロックされます。', 'eventbridge-post-events'); ?></p>
+            <br>
+
+            <label>
+                <input type="radio" name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[send_mode]" value="async" <?php checked($current, 'async'); ?>>
+                <?php esc_html_e('非同期送信（推奨）', 'eventbridge-post-events'); ?>
+            </label>
+            <p class="description"><?php esc_html_e('wp-cronを使用してバックグラウンドで送信します。UIをブロックしません。', 'eventbridge-post-events'); ?></p>
+        </fieldset>
+        <?php
+    }
+
+    /**
+     * Render settings page
+     */
+    public function render_settings_page()
+    {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        ?>
+        <div class="wrap">
+            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+
+            <?php
+            // Display current metrics
+            $metrics = get_option(self::OPTION_METRICS, array('successful_events' => 0, 'failed_events' => 0));
+            ?>
+            <div class="card" style="max-width:600px;margin-bottom:20px;">
+                <h2><?php esc_html_e('送信統計', 'eventbridge-post-events'); ?></h2>
+                <table class="form-table">
+                    <tr>
+                        <th><?php esc_html_e('成功', 'eventbridge-post-events'); ?></th>
+                        <td><strong style="color:green;"><?php echo esc_html($metrics['successful_events']); ?></strong></td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('失敗', 'eventbridge-post-events'); ?></th>
+                        <td><strong style="color:<?php echo $metrics['failed_events'] > 0 ? 'red' : 'inherit'; ?>;"><?php echo esc_html($metrics['failed_events']); ?></strong></td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('リージョン', 'eventbridge-post-events'); ?></th>
+                        <td><?php echo esc_html($this->region ?: __('未設定', 'eventbridge-post-events')); ?></td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('イベントバス', 'eventbridge-post-events'); ?></th>
+                        <td><?php echo esc_html(EVENT_BUS_NAME); ?></td>
+                    </tr>
+                </table>
+            </div>
+
+            <form action="options.php" method="post">
+                <?php
+                settings_fields('eventbridge_settings_group');
+                do_settings_sections('eventbridge-settings');
+                submit_button(__('設定を保存', 'eventbridge-post-events'));
+                ?>
+            </form>
+        </div>
+        <?php
     }
 
     /**
@@ -481,7 +710,27 @@ class EventBridgePostEvents
     }
 
     /**
-     * 投稿のイベントをEventBridgeに送信する（非同期スケジュール + エンベロープ）
+     * Prepare event payload based on format setting
+     *
+     * @param array $event_data イベントデータ
+     * @param int $post_id 投稿ID
+     * @return array イベントペイロード
+     */
+    private function prepare_event_payload($event_data, $post_id)
+    {
+        $event_format = $this->get_setting('event_format');
+
+        if ($event_format === 'envelope') {
+            $correlation_id = $this->get_or_create_correlation_id($post_id);
+            return $this->create_event_envelope($event_data, $correlation_id);
+        }
+
+        // Legacy format - send event_data directly
+        return $event_data;
+    }
+
+    /**
+     * 投稿のイベントをEventBridgeに送信する
      *
      * @param string $new_status 新しい投稿ステータス
      * @param string $old_status 前の投稿ステータス
@@ -502,12 +751,10 @@ class EventBridgePostEvents
         $rest_base = !empty($post_type_obj->rest_base) ? $post_type_obj->rest_base : $post_type;
         $api_url = get_rest_url(null, 'wp/v2/' . $rest_base . '/' . $post->ID);
 
-        // Get or create correlation_id
-        $correlation_id = $this->get_or_create_correlation_id($post->ID);
-
         $event_data = array(
             'id' => (string)$post->ID,
             'title' => $post->post_title,
+            'excerpt' => $post->post_excerpt,
             'status' => $new_status,
             'updated_at' => time(),
             'permalink' => $permalink,
@@ -516,15 +763,12 @@ class EventBridgePostEvents
             'previous_status' => $old_status
         );
 
-        // Create event envelope
-        $event_envelope = $this->create_event_envelope($event_data, $correlation_id);
-
-        // 非同期でEventBridgeに送信（UIをブロックしない）
-        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_envelope));
+        $event_payload = $this->prepare_event_payload($event_data, $post->ID);
+        $this->dispatch_event(EVENT_SOURCE_NAME, $event_name, $event_payload);
     }
 
     /**
-     * 投稿削除のイベントをEventBridgeに送信する（非同期スケジュール + エンベロープ）
+     * 投稿削除のイベントをEventBridgeに送信する
      *
      * @param int $post_id 投稿ID
      */
@@ -532,18 +776,52 @@ class EventBridgePostEvents
     {
         $event_name = 'post.deleted';
 
-        // Get correlation_id (or generate new one if not found - edge case)
-        $correlation_id = $this->get_or_create_correlation_id($post_id);
-
         $event_data = array(
             'id' => (string)$post_id
         );
 
-        // Create event envelope
-        $event_envelope = $this->create_event_envelope($event_data, $correlation_id);
+        $event_payload = $this->prepare_event_payload($event_data, $post_id);
+        $this->dispatch_event(EVENT_SOURCE_NAME, $event_name, $event_payload);
+    }
 
-        // 非同期でEventBridgeに送信（UIをブロックしない）
-        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_envelope));
+    /**
+     * Dispatch event based on send mode setting
+     *
+     * @param string $source イベントソース
+     * @param string $event_name イベント名
+     * @param array $event_payload イベントペイロード
+     */
+    private function dispatch_event($source, $event_name, $event_payload)
+    {
+        $send_mode = $this->get_setting('send_mode');
+
+        if ($send_mode === 'sync') {
+            // 同期送信 - 即座にEventBridgeへ送信
+            $this->do_send_event($source, $event_name, $event_payload);
+        } else {
+            // 非同期送信 - wp-cronでバックグラウンド処理
+            wp_schedule_single_event(time(), 'eventbridge_async_send_event', array($source, $event_name, $event_payload));
+        }
+    }
+
+    /**
+     * Execute the actual event sending and handle result tracking
+     *
+     * @param string $source イベントソース
+     * @param string $detailType イベント詳細タイプ
+     * @param array $detail イベント詳細データ
+     * @return array 送信結果（success, error, response）
+     */
+    private function do_send_event($source, $detailType, $detail)
+    {
+        $result = $this->client->sendEvent($source, $detailType, $detail);
+        $this->track_event_result($result);
+
+        if (!$result['success']) {
+            do_action('eventbridge_send_failed', $source, $detailType, $detail);
+        }
+
+        return $result;
     }
 
     /**
@@ -556,18 +834,7 @@ class EventBridgePostEvents
      */
     public function async_send_event($source, $detailType, $detail)
     {
-        // バックグラウンドでEventBridge API呼び出し（リトライ処理含む）
-        $result = $this->client->sendEvent($source, $detailType, $detail);
-
-        // メトリクスを追跡
-        $this->track_event_result($result);
-
-        if (!$result['success']) {
-            // 監視・アラート・デッドレターキュー処理用のフック
-            do_action('eventbridge_send_failed', $source, $detailType, $detail);
-        }
-
-        return $result;
+        return $this->do_send_event($source, $detailType, $detail);
     }
 
     /**
