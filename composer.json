@@ -1,0 +1,48 @@
+{
+  "name": "hideokamoto/event-publisher-on-aws",
+  "description": "WordPress plugin for publishing events to Amazon EventBridge",
+  "type": "wordpress-plugin",
+  "license": "GPL-3.0-or-later",
+  "authors": [
+    {
+      "name": "hideokamoto",
+      "email": "hideokamoto@example.com"
+    }
+  ],
+  "require": {},
+  "require-dev": {
+    "phpunit/phpunit": "^9.6",
+    "yoast/phpunit-polyfills": "^2.0",
+    "brain/monkey": "^2.6"
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "EventPublisherOnAWS\\Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit",
+    "test:unit": "phpunit --testsuite unit",
+    "test:integration": "phpunit --testsuite integration"
+  },
+  "config": {
+    "allow-plugins": {
+      "dealerdirect/phpcodesniffer-composer-installer": true
+    },
+    "sort-packages": true,
+    "optimize-autoloader": true
+  },
+  "_comment": [
+    "IMPORTANT: This plugin uses ONLY dev dependencies (require-dev).",
+    "The vendor/ directory MUST NEVER be included in the plugin distribution.",
+    "All Composer dependencies are for testing purposes only and are not required",
+    "for the plugin to function in production WordPress environments.",
+    "",
+    "Dependencies:",
+    "- phpunit/phpunit: Testing framework for running unit and integration tests",
+    "- yoast/phpunit-polyfills: Polyfills for PHPUnit to support multiple PHP versions",
+    "- brain/monkey: WordPress function mocking library for unit tests without WordPress",
+    "",
+    "The plugin code is entirely self-contained and has no production dependencies."
+  ]
+}

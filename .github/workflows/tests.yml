@@ -1,0 +1,155 @@
+name: PHPUnit Tests
+
+on:
+  push:
+    branches: [ main, develop, claude/** ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php-version }} - WP ${{ matrix.wp-version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['7.4', '8.0', '8.1', '8.2']
+        wp-version: ['6.4', '6.5', '6.6', '6.7', 'latest']
+        exclude:
+          # Exclude PHP 7.4 with WP 6.7+ (requires PHP 7.2+, but works best with 8.0+)
+          - php-version: '7.4'
+            wp-version: '6.7'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: mysqli, mbstring, json, xml
+          coverage: none
+          tools: composer
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Configure wp-env for PHP version
+        run: |
+          cat > .wp-env.override.json << EOF
+          {
+            "core": "WordPress/WordPress#${{ matrix.wp-version }}",
+            "phpVersion": "${{ matrix.php-version }}",
+            "plugins": ["."]
+          }
+          EOF
+          cat .wp-env.override.json
+
+      - name: Start wp-env
+        run: npm run wp-env start
+
+      - name: Install Composer dependencies in wp-env
+        run: npm run test:setup
+
+      - name: Verify vendor directory is not in plugin root
+        run: |
+          if [ -d "vendor" ]; then
+            echo "ERROR: vendor/ directory found in plugin root. This directory must never be distributed with the plugin."
+            echo "Composer dependencies are dev-only and should only exist inside wp-env container."
+            exit 1
+          fi
+          echo "✓ Verified: vendor/ directory not present in plugin distribution"
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Run integration tests
+        run: npm run test:integration
+
+      - name: Stop wp-env
+        if: always()
+        run: npm run wp-env stop
+
+  verify-no-production-dependencies:
+    name: Verify No Production Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify composer.json has no production dependencies
+        run: |
+          # Check that composer.json only has require-dev, not require
+          if grep -q '"require"[[:space:]]*:[[:space:]]*{' composer.json; then
+            # Check if require section has any dependencies (ignoring empty or PHP version only)
+            REQUIRE_CONTENT=$(sed -n '/"require"[[:space:]]*:[[:space:]]*{/,/}/p' composer.json | grep -v '"require"' | grep -v '^[[:space:]]*}' | grep -v 'php')
+            if [ ! -z "$REQUIRE_CONTENT" ]; then
+              echo "ERROR: composer.json contains production dependencies in 'require' section"
+              echo "This plugin must use ONLY dev dependencies (require-dev)"
+              echo "Found: $REQUIRE_CONTENT"
+              exit 1
+            fi
+          fi
+          echo "✓ Verified: composer.json contains only dev dependencies"
+
+      - name: Verify vendor directory is in .gitignore
+        run: |
+          if ! grep -q "vendor" .gitignore; then
+            echo "ERROR: vendor/ directory must be listed in .gitignore"
+            exit 1
+          fi
+          echo "✓ Verified: vendor/ directory is in .gitignore"
+
+      - name: Verify vendor directory does not exist in repository
+        run: |
+          if [ -d "vendor" ]; then
+            echo "ERROR: vendor/ directory found in repository"
+            echo "This directory must never be committed to the repository"
+            exit 1
+          fi
+          echo "✓ Verified: vendor/ directory not present in repository"
+
+      - name: Check for accidental dependency commits
+        run: |
+          # Verify no Composer lock file is committed (it's for dev only)
+          if [ -f "composer.lock" ] && git ls-files --error-unmatch composer.lock 2>/dev/null; then
+            echo "WARNING: composer.lock is committed to repository"
+            echo "Consider adding it to .gitignore as it's only needed for development"
+          fi
+          echo "✓ Dependency commit check complete"
+
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [test, verify-no-production-dependencies]
+    if: always()
+
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.verify-no-production-dependencies.result }}" != "success" ]; then
+            echo "Tests failed or verification failed"
+            exit 1
+          fi
+          echo "All tests passed successfully!"
