@@ -313,6 +313,7 @@ class EventBridgePostEvents
         // Settings page - always register regardless of credentials
         add_action('admin_menu', array($this, 'add_settings_menu'));
         add_action('admin_init', array($this, 'register_settings'));
+        add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_styles'));
 
         // AWS認証情報の検証（定義されていて、空の値ではないか確認）
         if (empty(constant('AWS_EVENTBRIDGE_ACCESS_KEY_ID')) || empty(constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY'))) {
@@ -375,6 +376,11 @@ class EventBridgePostEvents
             get_option(self::OPTION_SETTINGS, array()),
             $this->get_default_settings()
         );
+
+        // Ensure enabled_post_types is always a valid array
+        if (!isset($this->settings['enabled_post_types']) || !is_array($this->settings['enabled_post_types'])) {
+            $this->settings['enabled_post_types'] = array('post');
+        }
     }
 
     /**
@@ -399,6 +405,26 @@ class EventBridgePostEvents
             'manage_options',
             'eventbridge-settings',
             array($this, 'render_settings_page')
+        );
+    }
+
+    /**
+     * Enqueue admin styles for settings page
+     *
+     * @param string $hook The current admin page hook
+     */
+    public function enqueue_admin_styles($hook)
+    {
+        // Only load on our settings page
+        if ($hook !== 'settings_page_eventbridge-settings') {
+            return;
+        }
+
+        wp_enqueue_style(
+            'eventbridge-admin-settings',
+            plugin_dir_url(__FILE__) . 'assets/css/admin-settings.css',
+            array(),
+            '1.0.0'
         );
     }
 
@@ -496,9 +522,15 @@ class EventBridgePostEvents
         $post_types = get_post_types(array('public' => true), 'objects');
         $available = array();
 
+        /**
+         * Filter the list of post types to exclude from EventBridge settings
+         *
+         * @param array $excluded_post_types Array of post type slugs to exclude
+         */
+        $excluded_post_types = apply_filters('eventbridge_excluded_post_types', array('attachment'));
+
         foreach ($post_types as $post_type => $post_type_obj) {
-            // Exclude attachment (media) by default as it's rarely needed
-            if ($post_type === 'attachment') {
+            if (in_array($post_type, $excluded_post_types, true)) {
                 continue;
             }
             $available[$post_type] = $post_type_obj->labels->name;
@@ -570,10 +602,6 @@ class EventBridgePostEvents
     public function render_post_types_field()
     {
         $enabled_post_types = $this->get_setting('enabled_post_types');
-        if (!is_array($enabled_post_types)) {
-            $enabled_post_types = array('post');
-        }
-
         $available_post_types = $this->get_available_post_types();
 
         if (empty($available_post_types)) {
@@ -582,20 +610,20 @@ class EventBridgePostEvents
         }
         ?>
         <fieldset>
-            <p class="description" style="margin-bottom: 10px;">
+            <p class="description eventbridge-post-types-description">
                 <?php esc_html_e('EventBridgeにイベントを送信する投稿タイプを選択してください。', 'eventbridge-post-events'); ?>
             </p>
             <?php foreach ($available_post_types as $post_type => $label) : ?>
-                <label style="display: block; margin-bottom: 8px;">
+                <label class="eventbridge-post-type-label">
                     <input type="checkbox"
                            name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[enabled_post_types][]"
                            value="<?php echo esc_attr($post_type); ?>"
                            <?php checked(in_array($post_type, $enabled_post_types, true)); ?>>
                     <?php echo esc_html($label); ?>
-                    <code style="font-size: 11px; color: #666;"><?php echo esc_html($post_type); ?></code>
+                    <code class="eventbridge-post-type-slug"><?php echo esc_html($post_type); ?></code>
                 </label>
             <?php endforeach; ?>
-            <p class="description" style="margin-top: 10px;">
+            <p class="description eventbridge-post-types-note">
                 <?php esc_html_e('※ 少なくとも1つの投稿タイプを選択してください。未選択の場合は「投稿」がデフォルトで選択されます。', 'eventbridge-post-events'); ?>
             </p>
         </fieldset>
@@ -799,19 +827,42 @@ class EventBridgePostEvents
      *
      * @param array $event_data イベントデータ
      * @param int $post_id 投稿ID
+     * @param bool $is_delete_event Whether this is a delete event (avoids unnecessary meta writes)
      * @return array イベントペイロード
      */
-    private function prepare_event_payload($event_data, $post_id)
+    private function prepare_event_payload($event_data, $post_id, $is_delete_event = false)
     {
         $event_format = $this->get_setting('event_format');
 
         if ($event_format === 'envelope') {
-            $correlation_id = $this->get_or_create_correlation_id($post_id);
+            $correlation_id = $is_delete_event
+                ? $this->get_existing_correlation_id($post_id)
+                : $this->get_or_create_correlation_id($post_id);
             return $this->create_event_envelope($event_data, $correlation_id);
         }
 
         // Legacy format - send event_data directly
         return $event_data;
+    }
+
+    /**
+     * Get existing correlation ID without creating a new one
+     * Used for delete events to avoid unnecessary DB writes
+     *
+     * @param int $post_id 投稿ID
+     * @return string コリレーションID (existing or newly generated without saving)
+     */
+    private function get_existing_correlation_id($post_id)
+    {
+        $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
+
+        // If no existing correlation ID, generate one but don't save it
+        // (the post is being deleted anyway)
+        if (empty($correlation_id)) {
+            $correlation_id = wp_generate_uuid4();
+        }
+
+        return $correlation_id;
     }
 
     /**
@@ -882,7 +933,7 @@ class EventBridgePostEvents
             'post_type' => $post->post_type
         );
 
-        $event_payload = $this->prepare_event_payload($event_data, $post_id);
+        $event_payload = $this->prepare_event_payload($event_data, $post_id, true);
         $this->dispatch_event(EVENT_SOURCE_NAME, $event_name, $event_payload);
     }
 
@@ -895,11 +946,6 @@ class EventBridgePostEvents
     private function is_post_type_enabled($post_type)
     {
         $enabled_post_types = $this->get_setting('enabled_post_types');
-
-        if (!is_array($enabled_post_types)) {
-            $enabled_post_types = array('post');
-        }
-
         return in_array($post_type, $enabled_post_types, true);
     }
 

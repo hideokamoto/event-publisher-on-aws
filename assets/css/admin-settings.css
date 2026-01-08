@@ -1,0 +1,22 @@
+/**
+ * EventBridge Post Events - Admin Settings Styles
+ */
+
+/* Post types field styles */
+.eventbridge-post-types-description {
+    margin-bottom: 10px;
+}
+
+.eventbridge-post-type-label {
+    display: block;
+    margin-bottom: 8px;
+}
+
+.eventbridge-post-type-slug {
+    font-size: 11px;
+    color: #666;
+}
+
+.eventbridge-post-types-note {
+    margin-top: 10px;
+}
