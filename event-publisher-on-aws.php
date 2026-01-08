@@ -8,9 +8,13 @@ Author: Your Name
 Author URI: https://example.com
 */
 
-// EventBridge設定
-define('EVENT_BUS_NAME', 'wp-kyoto'); // デフォルトのイベントバスを使用する場合
-define('EVENT_SOURCE_NAME', 'wordpress'); // デフォルトのイベントバスを使用する場合
+// EventBridge設定（wp-config.phpで上書き可能）
+if (!defined('EVENT_BUS_NAME')) {
+    define('EVENT_BUS_NAME', 'wp-kyoto');
+}
+if (!defined('EVENT_SOURCE_NAME')) {
+    define('EVENT_SOURCE_NAME', 'wordpress');
+}
 
 class EventBridgePutEvents
 {
@@ -44,7 +48,7 @@ class EventBridgePutEvents
             ),
         ));
 
-        $now = new DateTime();
+        $now = new DateTime('now', new DateTimeZone('UTC'));
         $amzDate = $now->format('Ymd\THis\Z');
         $dateStamp = $now->format('Ymd');
 
@@ -112,6 +116,8 @@ class EventBridgePutEvents
                 'method' => $method,
                 'headers' => $headers,
                 'body' => $payload,
+                'timeout' => 10,
+                'sslverify' => true,
             ));
 
             // Check if wp_remote_request returned a WP_Error
@@ -181,6 +187,24 @@ class EventBridgePutEvents
                 } else {
                     // Success - status code is 2xx
                     $data = json_decode($responseBody, true);
+
+                    // JSONデコードエラーのハンドリング
+                    if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
+                        $lastError = sprintf('Invalid JSON response: %s', json_last_error_msg());
+                        $lastResponseCode = 'JSONError';
+
+                        if ($verboseLogging) {
+                            error_log(sprintf(
+                                '[EventBridge] JSON decode error on attempt %d: %s, Body: %s',
+                                $attempt + 1,
+                                $lastError,
+                                substr($responseBody, 0, 500)
+                            ));
+                        }
+
+                        // JSONエラーは通常リトライ可能ではないので、ループを抜ける
+                        break;
+                    }
 
                     // Check for partial failures in PutEvents response
                     $failedCount = isset($data['FailedEntryCount']) ? (int)$data['FailedEntryCount'] : 0;
@@ -300,7 +324,10 @@ class EventBridgePostEvents
     public function __construct()
     {
         // AWS認証情報の検証（定義されていて、空の値ではないか確認）
-        if (empty(constant('AWS_EVENTBRIDGE_ACCESS_KEY_ID')) || empty(constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY'))) {
+        if (!defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') ||
+            !defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY') ||
+            empty(AWS_EVENTBRIDGE_ACCESS_KEY_ID) ||
+            empty(AWS_EVENTBRIDGE_SECRET_ACCESS_KEY)) {
             add_action('admin_notices', function() {
                 ?>
                 <div class="notice notice-error">
@@ -311,9 +338,24 @@ class EventBridgePostEvents
             return;
         }
 
+        // リージョンの取得（EC2インスタンスメタデータ、または定数からのフォールバック）
         $identity = $this->get_instance_identity();
-        $this->region = $identity['region'];
-		$this->client = new EventBridgePutEvents(AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY, $this->region);
+        if (!empty($identity['region'])) {
+            $this->region = $identity['region'];
+        } elseif (defined('AWS_EVENTBRIDGE_REGION') && !empty(AWS_EVENTBRIDGE_REGION)) {
+            $this->region = AWS_EVENTBRIDGE_REGION;
+        } else {
+            add_action('admin_notices', function() {
+                ?>
+                <div class="notice notice-error">
+                    <p><?php esc_html_e('EventBridge Post Events: AWSリージョンを特定できません。EC2以外の環境では、wp-config.phpでAWS_EVENTBRIDGE_REGION定数を定義してください。', 'eventbridge-post-events'); ?></p>
+                </div>
+                <?php
+            });
+            return;
+        }
+
+        $this->client = new EventBridgePutEvents(AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY, $this->region);
 
         // Load metrics from WordPress options
         $this->load_metrics();
@@ -423,18 +465,55 @@ class EventBridgePostEvents
     }
 
     /**
-     * インスタンスメタデータから識別情報を取得する
+     * インスタンスメタデータから識別情報を取得する（IMDSv2対応）
+     *
+     * IMDSv2はトークンベース認証を使用し、SSRF攻撃に対してより安全です。
+     * EC2以外の環境では空配列を返します。
      *
      * @return array インスタンス識別情報
      */
     private function get_instance_identity()
     {
-        $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document');
+        // IMDSv2: まずセッショントークンを取得
+        $token_response = wp_remote_request('http://169.254.169.254/latest/api/token', array(
+            'method' => 'PUT',
+            'headers' => array('X-aws-ec2-metadata-token-ttl-seconds' => '21600'),
+            'timeout' => 2,
+        ));
+
+        if (is_wp_error($token_response)) {
+            return array();
+        }
+
+        $token_status = wp_remote_retrieve_response_code($token_response);
+        if ($token_status !== 200) {
+            return array();
+        }
+
+        $token = wp_remote_retrieve_body($token_response);
+        if (empty($token)) {
+            return array();
+        }
+
+        // トークンを使ってメタデータを取得
+        $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document', array(
+            'headers' => array('X-aws-ec2-metadata-token' => $token),
+            'timeout' => 2,
+        ));
+
         if (is_wp_error($response)) {
             return array();
         }
+
+        $status = wp_remote_retrieve_response_code($response);
+        if ($status !== 200) {
+            return array();
+        }
+
         $body = wp_remote_retrieve_body($response);
-        return json_decode($body, true);
+        $data = json_decode($body, true);
+
+        return is_array($data) ? $data : array();
     }
 
     /**
