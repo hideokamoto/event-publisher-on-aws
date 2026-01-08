@@ -1,0 +1,30 @@
+{
+    "name": "your-name/event-publisher-on-aws",
+    "description": "WordPress plugin that sends events to Amazon EventBridge when posts are published, updated, or deleted",
+    "type": "wordpress-plugin",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": ">=7.4",
+        "aws/aws-sdk-php": "^3.300"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.6",
+        "yoast/phpunit-polyfills": "^2.0",
+        "brain/monkey": "^2.6"
+    },
+    "autoload": {
+        "classmap": [
+            "event-publisher-on-aws.php"
+        ]
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "preferred-install": "dist",
+        "sort-packages": true
+    },
+    "scripts": {
+        "test": "phpunit",
+        "test:unit": "phpunit --testsuite unit",
+        "test:integration": "phpunit --testsuite integration"
+    }
+}

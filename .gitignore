@@ -1,3 +1,8 @@
 node_modules
 *.js
 index.html
+
+# Composer dependencies
+vendor/
+# Include composer.lock for consistent dependency versions
+!composer.lock
