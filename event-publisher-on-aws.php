@@ -252,21 +252,31 @@ class EventBridgePutEvents
             }
         }
 
+        // Determine if the last error was transient based on response code
+        $isLastErrorTransient = false;
+        if (is_int($lastResponseCode)) {
+            $isLastErrorTransient = ($lastResponseCode >= 500 && $lastResponseCode < 600) || $lastResponseCode === 429;
+        } elseif ($lastResponseCode === 'WP_Error' || $lastResponseCode === 'PartialFailure') {
+            // WP_Error and PartialFailure are considered transient
+            $isLastErrorTransient = true;
+        }
+
         // All retries exhausted - log comprehensive error details (excluding sensitive event data)
         error_log(sprintf(
-            '[EventBridge] FAILED after %d attempts - DetailType: %s, PostID: %s, LastError: %s, LastResponseCode: %s, Region: %s, EventBus: %s, Timestamp: %s',
+            '[EventBridge] FAILED after %d attempts - DetailType: %s, PostID: %s, LastError: %s, LastResponseCode: %s, IsTransient: %s, Region: %s, EventBus: %s, Timestamp: %s',
             $maxRetries + 1,
             $detailType,
             $postId,
             $lastError,
             $lastResponseCode,
+            $isLastErrorTransient ? 'yes' : 'no',
             $this->region,
             EVENT_BUS_NAME,
             $timestamp
         ));
 
         // Return array format for metrics tracking compatibility
-        return array('success' => false, 'error' => $lastError, 'response' => null);
+        return array('success' => false, 'error' => $lastError, 'response' => null, 'is_transient' => $isLastErrorTransient);
     }
 
     private function getSignatureKey($dateStamp)
@@ -290,6 +300,8 @@ class EventBridgePostEvents
     // In-memory counters for tracking metrics
     private $successful_events = 0;
     private $failed_events = 0;
+    private $transient_failures = 0;
+    private $permanent_failures = 0;
 
     // WordPress options keys for persistent storage (non-autoload for performance)
     const OPTION_METRICS = 'eventbridge_metrics';
@@ -531,7 +543,12 @@ class EventBridgePostEvents
 
             <?php
             // Display current metrics
-            $metrics = get_option(self::OPTION_METRICS, array('successful_events' => 0, 'failed_events' => 0));
+            $metrics = get_option(self::OPTION_METRICS, array(
+                'successful_events' => 0,
+                'failed_events' => 0,
+                'transient_failures' => 0,
+                'permanent_failures' => 0
+            ));
             ?>
             <div class="card" style="max-width:600px;margin-bottom:20px;">
                 <h2><?php esc_html_e('送信統計', 'eventbridge-post-events'); ?></h2>
@@ -543,6 +560,14 @@ class EventBridgePostEvents
                     <tr>
                         <th><?php esc_html_e('失敗', 'eventbridge-post-events'); ?></th>
                         <td><strong style="color:<?php echo $metrics['failed_events'] > 0 ? 'red' : 'inherit'; ?>;"><?php echo esc_html($metrics['failed_events']); ?></strong></td>
+                    </tr>
+                    <tr>
+                        <th style="padding-left:20px;"><?php esc_html_e('└ 一時的な失敗', 'eventbridge-post-events'); ?></th>
+                        <td><strong style="color:orange;"><?php echo esc_html(isset($metrics['transient_failures']) ? $metrics['transient_failures'] : 0); ?></strong> <span class="description">(リトライ可能)</span></td>
+                    </tr>
+                    <tr>
+                        <th style="padding-left:20px;"><?php esc_html_e('└ 恒久的な失敗', 'eventbridge-post-events'); ?></th>
+                        <td><strong style="color:red;"><?php echo esc_html(isset($metrics['permanent_failures']) ? $metrics['permanent_failures'] : 0); ?></strong> <span class="description">(設定要確認)</span></td>
                     </tr>
                     <tr>
                         <th><?php esc_html_e('リージョン', 'eventbridge-post-events'); ?></th>
@@ -573,11 +598,15 @@ class EventBridgePostEvents
     {
         $metrics = get_option(self::OPTION_METRICS, array(
             'successful_events' => 0,
-            'failed_events' => 0
+            'failed_events' => 0,
+            'transient_failures' => 0,
+            'permanent_failures' => 0
         ));
 
         $this->successful_events = (int) $metrics['successful_events'];
         $this->failed_events = (int) $metrics['failed_events'];
+        $this->transient_failures = (int) (isset($metrics['transient_failures']) ? $metrics['transient_failures'] : 0);
+        $this->permanent_failures = (int) (isset($metrics['permanent_failures']) ? $metrics['permanent_failures'] : 0);
     }
 
     /**
@@ -588,7 +617,9 @@ class EventBridgePostEvents
     {
         $metrics = array(
             'successful_events' => $this->successful_events,
-            'failed_events' => $this->failed_events
+            'failed_events' => $this->failed_events,
+            'transient_failures' => $this->transient_failures,
+            'permanent_failures' => $this->permanent_failures
         );
         update_option(self::OPTION_METRICS, $metrics, false);
     }
@@ -607,11 +638,17 @@ class EventBridgePostEvents
      * Consolidates DB writes to reduce I/O and race conditions
      *
      * @param string $error_message The error message
+     * @param bool $is_transient Whether the failure is transient (retryable) or permanent
      */
-    private function record_failure($error_message)
+    private function record_failure($error_message, $is_transient = false)
     {
-        // Increment in-memory counter
+        // Increment in-memory counters
         $this->failed_events++;
+        if ($is_transient) {
+            $this->transient_failures++;
+        } else {
+            $this->permanent_failures++;
+        }
 
         // Read, mutate, and write failure details in one operation
         $failure_details = get_option(self::OPTION_FAILURE_DETAILS, array(
@@ -622,7 +659,8 @@ class EventBridgePostEvents
         $failure_details['last_failure_time'] = current_time('mysql');
         $failure_details['messages'][] = array(
             'time' => current_time('mysql'),
-            'message' => $error_message
+            'message' => $error_message,
+            'type' => $is_transient ? 'transient' : 'permanent'
         );
 
         // Keep only the last 10 failure messages
@@ -647,7 +685,8 @@ class EventBridgePostEvents
             $this->record_success();
         } else {
             $error_message = isset($result['error']) ? $result['error'] : 'Unknown error';
-            $this->record_failure($error_message);
+            $is_transient = isset($result['is_transient']) ? $result['is_transient'] : false;
+            $this->record_failure($error_message, $is_transient);
         }
     }
 
@@ -696,17 +735,51 @@ class EventBridgePostEvents
         $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
 
         if (empty($correlation_id)) {
-            $correlation_id = wp_generate_uuid4();
+            // Try wp_generate_uuid4() first (WordPress 4.7+)
+            if (function_exists('wp_generate_uuid4')) {
+                $correlation_id = wp_generate_uuid4();
+            } else {
+                // Fallback: generate UUID v4 manually
+                $correlation_id = $this->generate_uuid_v4();
+            }
+
             $added = add_post_meta($post_id, '_event_correlation_id', $correlation_id, true);
 
             // If add_post_meta returned false, another request wrote the meta first
             // Re-read the actual value that was stored
             if ($added === false) {
                 $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
+
+                // Final fallback if correlation_id is still empty
+                if (empty($correlation_id)) {
+                    $correlation_id = $this->generate_uuid_v4();
+                    error_log(sprintf(
+                        '[EventBridge] Using fallback UUID for post ID %d: %s',
+                        $post_id,
+                        $correlation_id
+                    ));
+                }
             }
         }
 
         return $correlation_id;
+    }
+
+    /**
+     * Generate UUID v4 as fallback when wp_generate_uuid4() is not available
+     *
+     * @return string UUID v4
+     */
+    private function generate_uuid_v4()
+    {
+        $data = random_bytes(16);
+
+        // Set version to 0100
+        $data[6] = chr(ord($data[6]) & 0x0f | 0x40);
+        // Set bits 6-7 to 10
+        $data[8] = chr(ord($data[8]) & 0x3f | 0x80);
+
+        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
     }
 
     /**
@@ -738,32 +811,93 @@ class EventBridgePostEvents
      */
     public function send_post_event($new_status, $old_status, $post)
     {
-        if ($new_status !== 'publish') {
+        // Validate post object
+        if (!($post instanceof WP_Post) || empty($post->ID)) {
+            error_log('[EventBridge] Invalid post object provided to send_post_event');
             return;
         }
 
-        $event_name = $new_status === $old_status ? 'post.updated' : 'post.' . $new_status . 'ed'; // post.published、post.drafted など
+        // Only handle publish and future status transitions
+        if ($new_status !== 'publish' && $new_status !== 'future') {
+            return;
+        }
+
+        // Validate post type (configurable allowlist)
+        $allowed_post_types = apply_filters('eventbridge_allowed_post_types', array('post', 'page'));
+        if (!in_array($post->post_type, $allowed_post_types, true)) {
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log(sprintf(
+                    '[EventBridge] Post type "%s" not in allowed list for post ID %d',
+                    $post->post_type,
+                    $post->ID
+                ));
+            }
+            return;
+        }
+
+        // Determine event type based on status transition
+        if ($new_status === 'future') {
+            // Scheduled post
+            $event_name = 'post.scheduled';
+        } elseif ($new_status === 'publish' && $old_status === 'publish') {
+            // Update to already published post
+            $event_name = 'post.updated';
+        } elseif ($new_status === 'publish' && $old_status !== 'publish') {
+            // New publish (from draft, future, etc.)
+            $event_name = 'post.published';
+        } else {
+            // Fallback
+            $event_name = 'post.' . $new_status . 'ed';
+        }
+
+        // Safely get post properties with null checks
         $permalink = get_permalink($post->ID);
-        $post_type = $post->post_type;
+        $post_type = !empty($post->post_type) ? $post->post_type : 'post';
+        $post_title = !empty($post->post_title) ? $post->post_title : '';
+        $post_excerpt = !empty($post->post_excerpt) ? $post->post_excerpt : '';
 
         // Get REST API URL using rest_base from post type object
         $post_type_obj = get_post_type_object($post_type);
-        $rest_base = !empty($post_type_obj->rest_base) ? $post_type_obj->rest_base : $post_type;
+        $rest_base = (!empty($post_type_obj) && !empty($post_type_obj->rest_base)) ? $post_type_obj->rest_base : $post_type;
         $api_url = get_rest_url(null, 'wp/v2/' . $rest_base . '/' . $post->ID);
 
         $event_data = array(
             'id' => (string)$post->ID,
-            'title' => $post->post_title,
-            'excerpt' => $post->post_excerpt,
+            'title' => $post_title,
+            'excerpt' => $post_excerpt,
             'status' => $new_status,
+            'previous_status' => $old_status,
             'updated_at' => time(),
             'permalink' => $permalink,
             'api_url' => $api_url,
-            'post_type' => $post_type,
-            'previous_status' => $old_status
+            'post_type' => $post_type
         );
 
         $event_payload = $this->prepare_event_payload($event_data, $post->ID);
+
+        // Validate payload size before sending (256KB EventBridge limit)
+        $payload_json = json_encode($event_payload);
+        if ($payload_json === false) {
+            error_log(sprintf(
+                '[EventBridge] Failed to JSON encode event payload for post ID %d: %s',
+                $post->ID,
+                json_last_error_msg()
+            ));
+            return;
+        }
+
+        $payload_size = strlen($payload_json);
+        $max_payload_size = 256 * 1024; // 256KB in bytes
+
+        if ($payload_size > $max_payload_size) {
+            error_log(sprintf(
+                '[EventBridge] Event payload exceeds 256KB limit for post ID %d (size: %d bytes)',
+                $post->ID,
+                $payload_size
+            ));
+            return;
+        }
+
         $this->dispatch_event(EVENT_SOURCE_NAME, $event_name, $event_payload);
     }
 
