@@ -1000,5 +1000,124 @@ class EventBridgePostEvents
     }
 }
 
+/**
+ * Plugin activation callback
+ * Initializes default options and validates AWS configuration
+ */
+function eventbridge_post_events_activate()
+{
+    // Initialize metrics with default values
+    $default_metrics = array(
+        'successful_events' => 0,
+        'failed_events' => 0
+    );
+    add_option('eventbridge_metrics', $default_metrics, '', false);
+
+    // Initialize settings with default values
+    $default_settings = array(
+        'event_format' => 'envelope',
+        'send_mode' => 'async'
+    );
+    add_option('eventbridge_settings', $default_settings, '', true);
+
+    // Validate AWS credentials
+    $activation_errors = array();
+    $activation_warnings = array();
+
+    if (!defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') || empty(constant('AWS_EVENTBRIDGE_ACCESS_KEY_ID'))) {
+        $activation_errors[] = 'AWS_EVENTBRIDGE_ACCESS_KEY_ID is not defined or empty in wp-config.php';
+    }
+
+    if (!defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY') || empty(constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY'))) {
+        $activation_errors[] = 'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY is not defined or empty in wp-config.php';
+    }
+
+    // Validate region detection
+    if (empty($activation_errors)) {
+        $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document', array(
+            'timeout' => 5
+        ));
+
+        if (is_wp_error($response)) {
+            $activation_warnings[] = sprintf(
+                'Unable to detect AWS region from instance metadata: %s. Please ensure the plugin is running on an EC2 instance or configure region manually.',
+                $response->get_error_message()
+            );
+        } else {
+            $body = wp_remote_retrieve_body($response);
+            $identity = json_decode($body, true);
+
+            if (empty($identity['region'])) {
+                $activation_warnings[] = 'AWS region could not be detected from instance metadata. Please ensure the plugin is running on an EC2 instance with proper IAM role.';
+            } else {
+                // Region detected successfully - log for confirmation
+                error_log(sprintf('[EventBridge] Plugin activated. Region detected: %s', $identity['region']));
+            }
+        }
+    }
+
+    // Store activation errors/warnings for display
+    if (!empty($activation_errors)) {
+        update_option('eventbridge_activation_errors', $activation_errors, false);
+        // Deactivate the plugin if there are critical errors
+        deactivate_plugins(plugin_basename(__FILE__));
+        wp_die(
+            '<h1>EventBridge Post Events - Activation Failed</h1>' .
+            '<p><strong>The following errors prevented plugin activation:</strong></p>' .
+            '<ul><li>' . implode('</li><li>', array_map('esc_html', $activation_errors)) . '</li></ul>' .
+            '<p>Please configure the required AWS credentials in wp-config.php:</p>' .
+            '<pre>define(\'AWS_EVENTBRIDGE_ACCESS_KEY_ID\', \'your-access-key-id\');<br>' .
+            'define(\'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY\', \'your-secret-access-key\');</pre>' .
+            '<p><a href="' . esc_url(admin_url('plugins.php')) . '">Return to Plugins</a></p>'
+        );
+    }
+
+    if (!empty($activation_warnings)) {
+        update_option('eventbridge_activation_warnings', $activation_warnings, false);
+    }
+
+    // Log successful activation
+    error_log('[EventBridge] Plugin activated successfully');
+}
+
+/**
+ * Plugin deactivation callback
+ * Clears scheduled events and transient notices, preserves metrics
+ */
+function eventbridge_post_events_deactivate()
+{
+    // Clear all scheduled single events for async EventBridge sending
+    // WordPress doesn't provide a direct way to get all scheduled events by hook,
+    // so we need to check the cron array
+    $cron_array = _get_cron_array();
+
+    if (is_array($cron_array)) {
+        foreach ($cron_array as $timestamp => $cron) {
+            if (isset($cron['eventbridge_async_send_event'])) {
+                foreach ($cron['eventbridge_async_send_event'] as $key => $event) {
+                    wp_unschedule_event($timestamp, 'eventbridge_async_send_event', $event['args']);
+                }
+            }
+        }
+    }
+
+    // Clear transient notices
+    delete_transient('eventbridge_notice_dismissed');
+
+    // Clear activation warnings if any
+    delete_option('eventbridge_activation_warnings');
+    delete_option('eventbridge_activation_errors');
+
+    // Preserve metrics and failure details for potential reactivation
+    // Do NOT delete: eventbridge_metrics, eventbridge_failure_details, eventbridge_settings
+
+    // Log deactivation
+    error_log('[EventBridge] Plugin deactivated - scheduled events and transients cleared');
+}
+
+// Register lifecycle hooks
+register_activation_hook(__FILE__, 'eventbridge_post_events_activate');
+register_deactivation_hook(__FILE__, 'eventbridge_post_events_deactivate');
+
 // インスタンスの作成
 new EventBridgePostEvents();
