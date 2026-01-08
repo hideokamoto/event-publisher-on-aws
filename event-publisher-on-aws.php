@@ -362,6 +362,7 @@ class EventBridgePostEvents
         return array(
             'event_format' => 'envelope', // 'legacy' or 'envelope'
             'send_mode' => 'async',       // 'sync' or 'async'
+            'enabled_post_types' => array('post'), // Post types to send events for
         );
     }
 
@@ -434,6 +435,14 @@ class EventBridgePostEvents
             'eventbridge-settings',
             'eventbridge_main_section'
         );
+
+        add_settings_field(
+            'enabled_post_types',
+            __('送信対象の投稿タイプ', 'eventbridge-post-events'),
+            array($this, 'render_post_types_field'),
+            'eventbridge-settings',
+            'eventbridge_main_section'
+        );
     }
 
     /**
@@ -457,7 +466,45 @@ class EventBridgePostEvents
             ? $input['send_mode']
             : $defaults['send_mode'];
 
+        // Sanitize enabled_post_types
+        $sanitized['enabled_post_types'] = array();
+        if (isset($input['enabled_post_types']) && is_array($input['enabled_post_types'])) {
+            $valid_post_types = $this->get_available_post_types();
+            foreach ($input['enabled_post_types'] as $post_type) {
+                $post_type = sanitize_key($post_type);
+                if (array_key_exists($post_type, $valid_post_types)) {
+                    $sanitized['enabled_post_types'][] = $post_type;
+                }
+            }
+        }
+
+        // If no post types selected, default to 'post'
+        if (empty($sanitized['enabled_post_types'])) {
+            $sanitized['enabled_post_types'] = $defaults['enabled_post_types'];
+        }
+
         return $sanitized;
+    }
+
+    /**
+     * Get available post types for EventBridge publishing
+     *
+     * @return array Associative array of post_type => label
+     */
+    private function get_available_post_types()
+    {
+        $post_types = get_post_types(array('public' => true), 'objects');
+        $available = array();
+
+        foreach ($post_types as $post_type => $post_type_obj) {
+            // Exclude attachment (media) by default as it's rarely needed
+            if ($post_type === 'attachment') {
+                continue;
+            }
+            $available[$post_type] = $post_type_obj->labels->name;
+        }
+
+        return $available;
     }
 
     /**
@@ -513,6 +560,44 @@ class EventBridgePostEvents
                 <?php esc_html_e('非同期送信（推奨）', 'eventbridge-post-events'); ?>
             </label>
             <p class="description"><?php esc_html_e('wp-cronを使用してバックグラウンドで送信します。UIをブロックしません。', 'eventbridge-post-events'); ?></p>
+        </fieldset>
+        <?php
+    }
+
+    /**
+     * Render post types field
+     */
+    public function render_post_types_field()
+    {
+        $enabled_post_types = $this->get_setting('enabled_post_types');
+        if (!is_array($enabled_post_types)) {
+            $enabled_post_types = array('post');
+        }
+
+        $available_post_types = $this->get_available_post_types();
+
+        if (empty($available_post_types)) {
+            echo '<p>' . esc_html__('利用可能な投稿タイプがありません。', 'eventbridge-post-events') . '</p>';
+            return;
+        }
+        ?>
+        <fieldset>
+            <p class="description" style="margin-bottom: 10px;">
+                <?php esc_html_e('EventBridgeにイベントを送信する投稿タイプを選択してください。', 'eventbridge-post-events'); ?>
+            </p>
+            <?php foreach ($available_post_types as $post_type => $label) : ?>
+                <label style="display: block; margin-bottom: 8px;">
+                    <input type="checkbox"
+                           name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[enabled_post_types][]"
+                           value="<?php echo esc_attr($post_type); ?>"
+                           <?php checked(in_array($post_type, $enabled_post_types, true)); ?>>
+                    <?php echo esc_html($label); ?>
+                    <code style="font-size: 11px; color: #666;"><?php echo esc_html($post_type); ?></code>
+                </label>
+            <?php endforeach; ?>
+            <p class="description" style="margin-top: 10px;">
+                <?php esc_html_e('※ 少なくとも1つの投稿タイプを選択してください。未選択の場合は「投稿」がデフォルトで選択されます。', 'eventbridge-post-events'); ?>
+            </p>
         </fieldset>
         <?php
     }
@@ -742,9 +827,14 @@ class EventBridgePostEvents
             return;
         }
 
+        // Check if this post type is enabled for EventBridge
+        $post_type = $post->post_type;
+        if (!$this->is_post_type_enabled($post_type)) {
+            return;
+        }
+
         $event_name = $new_status === $old_status ? 'post.updated' : 'post.' . $new_status . 'ed'; // post.published、post.drafted など
         $permalink = get_permalink($post->ID);
-        $post_type = $post->post_type;
 
         // Get REST API URL using rest_base from post type object
         $post_type_obj = get_post_type_object($post_type);
@@ -774,14 +864,43 @@ class EventBridgePostEvents
      */
     public function send_delete_post_event($post_id)
     {
+        // Get post to check its type
+        $post = get_post($post_id);
+        if (!$post) {
+            return;
+        }
+
+        // Check if this post type is enabled for EventBridge
+        if (!$this->is_post_type_enabled($post->post_type)) {
+            return;
+        }
+
         $event_name = 'post.deleted';
 
         $event_data = array(
-            'id' => (string)$post_id
+            'id' => (string)$post_id,
+            'post_type' => $post->post_type
         );
 
         $event_payload = $this->prepare_event_payload($event_data, $post_id);
         $this->dispatch_event(EVENT_SOURCE_NAME, $event_name, $event_payload);
+    }
+
+    /**
+     * Check if a post type is enabled for EventBridge events
+     *
+     * @param string $post_type Post type to check
+     * @return bool True if enabled, false otherwise
+     */
+    private function is_post_type_enabled($post_type)
+    {
+        $enabled_post_types = $this->get_setting('enabled_post_types');
+
+        if (!is_array($enabled_post_types)) {
+            $enabled_post_types = array('post');
+        }
+
+        return in_array($post_type, $enabled_post_types, true);
     }
 
     /**
