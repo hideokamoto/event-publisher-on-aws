@@ -508,6 +508,7 @@ class EventBridgePostEvents
         $event_data = array(
             'id' => (string)$post->ID,
             'title' => $post->post_title,
+            'excerpt' => $post->post_excerpt,
             'status' => $new_status,
             'updated_at' => time(),
             'permalink' => $permalink,
