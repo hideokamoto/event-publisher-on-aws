@@ -298,6 +298,10 @@ class EventBridgePostEvents
     const TRANSIENT_NOTICE_DISMISSED = 'eventbridge_notice_dismissed';
     const FAILURE_THRESHOLD = 5; // Number of failures before showing admin notice
 
+    // Valid setting values
+    const VALID_EVENT_FORMATS = array('legacy', 'envelope');
+    const VALID_SEND_MODES = array('sync', 'async');
+
     // Settings defaults
     private $settings;
 
@@ -305,6 +309,10 @@ class EventBridgePostEvents
     {
         // Load settings first
         $this->load_settings();
+
+        // Settings page - always register regardless of credentials
+        add_action('admin_menu', array($this, 'add_settings_menu'));
+        add_action('admin_init', array($this, 'register_settings'));
 
         // AWS認証情報の検証（定義されていて、空の値ではないか確認）
         if (empty(constant('AWS_EVENTBRIDGE_ACCESS_KEY_ID')) || empty(constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY'))) {
@@ -315,9 +323,6 @@ class EventBridgePostEvents
                 </div>
                 <?php
             });
-            // Still register admin menu for settings even without credentials
-            add_action('admin_menu', array($this, 'add_settings_menu'));
-            add_action('admin_init', array($this, 'register_settings'));
             return;
         }
 
@@ -345,10 +350,6 @@ class EventBridgePostEvents
 
         // Handle notice dismissal
         add_action('admin_init', array($this, 'handle_notice_dismissal'));
-
-        // Settings page
-        add_action('admin_menu', array($this, 'add_settings_menu'));
-        add_action('admin_init', array($this, 'register_settings'));
     }
 
     /**
@@ -444,16 +445,17 @@ class EventBridgePostEvents
     public function sanitize_settings($input)
     {
         $sanitized = array();
+        $defaults = $this->get_default_settings();
 
         // Sanitize event_format
-        $sanitized['event_format'] = isset($input['event_format']) && in_array($input['event_format'], array('legacy', 'envelope'), true)
+        $sanitized['event_format'] = isset($input['event_format']) && in_array($input['event_format'], self::VALID_EVENT_FORMATS, true)
             ? $input['event_format']
-            : 'envelope';
+            : $defaults['event_format'];
 
         // Sanitize send_mode
-        $sanitized['send_mode'] = isset($input['send_mode']) && in_array($input['send_mode'], array('sync', 'async'), true)
+        $sanitized['send_mode'] = isset($input['send_mode']) && in_array($input['send_mode'], self::VALID_SEND_MODES, true)
             ? $input['send_mode']
-            : 'async';
+            : $defaults['send_mode'];
 
         return $sanitized;
     }
@@ -708,6 +710,26 @@ class EventBridgePostEvents
     }
 
     /**
+     * Prepare event payload based on format setting
+     *
+     * @param array $event_data イベントデータ
+     * @param int $post_id 投稿ID
+     * @return array イベントペイロード
+     */
+    private function prepare_event_payload($event_data, $post_id)
+    {
+        $event_format = $this->get_setting('event_format');
+
+        if ($event_format === 'envelope') {
+            $correlation_id = $this->get_or_create_correlation_id($post_id);
+            return $this->create_event_envelope($event_data, $correlation_id);
+        }
+
+        // Legacy format - send event_data directly
+        return $event_data;
+    }
+
+    /**
      * 投稿のイベントをEventBridgeに送信する
      *
      * @param string $new_status 新しい投稿ステータス
@@ -741,17 +763,7 @@ class EventBridgePostEvents
             'previous_status' => $old_status
         );
 
-        // Determine event payload based on format setting
-        $event_format = $this->get_setting('event_format');
-        if ($event_format === 'envelope') {
-            $correlation_id = $this->get_or_create_correlation_id($post->ID);
-            $event_payload = $this->create_event_envelope($event_data, $correlation_id);
-        } else {
-            // Legacy format - send event_data directly
-            $event_payload = $event_data;
-        }
-
-        // Send based on mode setting
+        $event_payload = $this->prepare_event_payload($event_data, $post->ID);
         $this->dispatch_event(EVENT_SOURCE_NAME, $event_name, $event_payload);
     }
 
@@ -768,17 +780,7 @@ class EventBridgePostEvents
             'id' => (string)$post_id
         );
 
-        // Determine event payload based on format setting
-        $event_format = $this->get_setting('event_format');
-        if ($event_format === 'envelope') {
-            $correlation_id = $this->get_or_create_correlation_id($post_id);
-            $event_payload = $this->create_event_envelope($event_data, $correlation_id);
-        } else {
-            // Legacy format - send event_data directly
-            $event_payload = $event_data;
-        }
-
-        // Send based on mode setting
+        $event_payload = $this->prepare_event_payload($event_data, $post_id);
         $this->dispatch_event(EVENT_SOURCE_NAME, $event_name, $event_payload);
     }
 
@@ -795,16 +797,31 @@ class EventBridgePostEvents
 
         if ($send_mode === 'sync') {
             // 同期送信 - 即座にEventBridgeへ送信
-            $result = $this->client->sendEvent($source, $event_name, $event_payload);
-            $this->track_event_result($result);
-
-            if (!$result['success']) {
-                do_action('eventbridge_send_failed', $source, $event_name, $event_payload);
-            }
+            $this->do_send_event($source, $event_name, $event_payload);
         } else {
             // 非同期送信 - wp-cronでバックグラウンド処理
             wp_schedule_single_event(time(), 'eventbridge_async_send_event', array($source, $event_name, $event_payload));
         }
+    }
+
+    /**
+     * Execute the actual event sending and handle result tracking
+     *
+     * @param string $source イベントソース
+     * @param string $detailType イベント詳細タイプ
+     * @param array $detail イベント詳細データ
+     * @return array 送信結果（success, error, response）
+     */
+    private function do_send_event($source, $detailType, $detail)
+    {
+        $result = $this->client->sendEvent($source, $detailType, $detail);
+        $this->track_event_result($result);
+
+        if (!$result['success']) {
+            do_action('eventbridge_send_failed', $source, $detailType, $detail);
+        }
+
+        return $result;
     }
 
     /**
@@ -817,18 +834,7 @@ class EventBridgePostEvents
      */
     public function async_send_event($source, $detailType, $detail)
     {
-        // バックグラウンドでEventBridge API呼び出し（リトライ処理含む）
-        $result = $this->client->sendEvent($source, $detailType, $detail);
-
-        // メトリクスを追跡
-        $this->track_event_result($result);
-
-        if (!$result['success']) {
-            // 監視・アラート・デッドレターキュー処理用のフック
-            do_action('eventbridge_send_failed', $source, $detailType, $detail);
-        }
-
-        return $result;
+        return $this->do_send_event($source, $detailType, $detail);
     }
 
     /**
