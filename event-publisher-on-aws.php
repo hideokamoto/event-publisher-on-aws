@@ -20,14 +20,16 @@ class EventBridgePutEvents
 {
     private $accessKeyId;
     private $secretAccessKey;
+    private $sessionToken;
     private $region;
     private $endpoint;
     private $serviceName;
 
-    public function __construct($accessKeyId, $secretAccessKey, $region)
+    public function __construct($accessKeyId, $secretAccessKey, $region, $sessionToken = null)
     {
         $this->accessKeyId = $accessKeyId;
         $this->secretAccessKey = $secretAccessKey;
+        $this->sessionToken = $sessionToken;
         $this->region = $region;
         $this->endpoint = 'events.' . $region . '.amazonaws.com';
         $this->serviceName = 'events';
@@ -52,8 +54,14 @@ class EventBridgePutEvents
         $amzDate = $now->format('Ymd\THis\Z');
         $dateStamp = $now->format('Ymd');
 
-        $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-target:AWSEvents.PutEvents\n";
-        $signedHeaders = 'content-type;host;x-amz-date;x-amz-target';
+        // SessionTokenがある場合は署名対象のヘッダーに含める
+        if (!empty($this->sessionToken)) {
+            $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-security-token:{$this->sessionToken}\nx-amz-target:AWSEvents.PutEvents\n";
+            $signedHeaders = 'content-type;host;x-amz-date;x-amz-security-token;x-amz-target';
+        } else {
+            $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-target:AWSEvents.PutEvents\n";
+            $signedHeaders = 'content-type;host;x-amz-date;x-amz-target';
+        }
         $canonicalRequest = implode("\n", array(
             $method,
             $path,
@@ -82,6 +90,11 @@ class EventBridgePutEvents
             'X-Amz-Target' => 'AWSEvents.PutEvents',
             'Authorization' => $authorizationHeader,
         );
+
+        // SessionTokenがある場合はヘッダーに追加
+        if (!empty($this->sessionToken)) {
+            $headers['X-Amz-Security-Token'] = $this->sessionToken;
+        }
 
         // Retry configuration
         $maxRetries = 3;
@@ -321,17 +334,47 @@ class EventBridgePostEvents
     const TRANSIENT_NOTICE_DISMISSED = 'eventbridge_notice_dismissed';
     const FAILURE_THRESHOLD = 5; // Number of failures before showing admin notice
 
+    // IMDS cache transient keys
+    const TRANSIENT_IMDS_IDENTITY = 'eventbridge_imds_identity';
+    const TRANSIENT_IMDS_CREDENTIALS = 'eventbridge_imds_credentials';
+    const TRANSIENT_IMDS_FAILED = 'eventbridge_imds_failed';
+
+    // IMDS configuration
+    const IMDS_BASE_URL = 'http://169.254.169.254';
+    const IMDS_TIMEOUT = 2;
+    const IMDS_IDENTITY_CACHE_DURATION = 3600; // 1 hour for successful lookups
+    const IMDS_FAILED_CACHE_DURATION = 300;    // 5 minutes for failed lookups
+
     public function __construct()
     {
-        // AWS認証情報の検証（定義されていて、空の値ではないか確認）
-        if (!defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') ||
-            !defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY') ||
-            empty(AWS_EVENTBRIDGE_ACCESS_KEY_ID) ||
-            empty(AWS_EVENTBRIDGE_SECRET_ACCESS_KEY)) {
+        $access_key = null;
+        $secret_key = null;
+        $session_token = null;
+
+        // 認証情報の取得: 1. 定数から、2. インスタンスロールから
+        if (defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') &&
+            defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY') &&
+            !empty(AWS_EVENTBRIDGE_ACCESS_KEY_ID) &&
+            !empty(AWS_EVENTBRIDGE_SECRET_ACCESS_KEY)) {
+            // 定数から静的認証情報を取得
+            $access_key = AWS_EVENTBRIDGE_ACCESS_KEY_ID;
+            $secret_key = AWS_EVENTBRIDGE_SECRET_ACCESS_KEY;
+        } else {
+            // 定数が未定義の場合、EC2インスタンスロールから取得
+            $instance_creds = $this->get_instance_credentials();
+            if ($instance_creds !== null) {
+                $access_key = $instance_creds['AccessKeyId'];
+                $secret_key = $instance_creds['SecretAccessKey'];
+                $session_token = $instance_creds['Token'];
+            }
+        }
+
+        // 認証情報が取得できない場合のみエラー
+        if (empty($access_key) || empty($secret_key)) {
             add_action('admin_notices', function() {
                 ?>
                 <div class="notice notice-error">
-                    <p><?php esc_html_e('EventBridge Post Events: AWS認証情報が設定されていません。wp-config.phpでAWS_EVENTBRIDGE_ACCESS_KEY_IDとAWS_EVENTBRIDGE_SECRET_ACCESS_KEY定数を定義してください。', 'eventbridge-post-events'); ?></p>
+                    <p><?php esc_html_e('EventBridge Post Events: AWS認証情報が設定されていません。wp-config.phpで定数を定義するか、EC2インスタンスロールを設定してください。', 'eventbridge-post-events'); ?></p>
                 </div>
                 <?php
             });
@@ -355,7 +398,7 @@ class EventBridgePostEvents
             return;
         }
 
-        $this->client = new EventBridgePutEvents(AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY, $this->region);
+        $this->client = new EventBridgePutEvents($access_key, $secret_key, $this->region, $session_token);
 
         // Load metrics from WordPress options
         $this->load_metrics();
@@ -465,55 +508,175 @@ class EventBridgePostEvents
     }
 
     /**
-     * インスタンスメタデータから識別情報を取得する（IMDSv2対応）
+     * IMDSv2トークンを取得する
+     *
+     * @return string|null トークン、または取得失敗時はnull
+     */
+    private function get_imds_token()
+    {
+        $token_response = wp_remote_request(self::IMDS_BASE_URL . '/latest/api/token', array(
+            'method' => 'PUT',
+            'headers' => array('X-aws-ec2-metadata-token-ttl-seconds' => '21600'),
+            'timeout' => self::IMDS_TIMEOUT,
+        ));
+
+        if (is_wp_error($token_response) || wp_remote_retrieve_response_code($token_response) !== 200) {
+            return null;
+        }
+
+        $token = wp_remote_retrieve_body($token_response);
+        return !empty($token) ? $token : null;
+    }
+
+    /**
+     * インスタンスメタデータから識別情報を取得する（IMDSv2対応、キャッシュ付き）
      *
      * IMDSv2はトークンベース認証を使用し、SSRF攻撃に対してより安全です。
+     * 結果はWordPress transientにキャッシュされ、毎ページロードでのHTTPリクエストを回避します。
      * EC2以外の環境では空配列を返します。
      *
      * @return array インスタンス識別情報
      */
     private function get_instance_identity()
     {
-        // IMDSv2: まずセッショントークンを取得
-        $token_response = wp_remote_request('http://169.254.169.254/latest/api/token', array(
-            'method' => 'PUT',
-            'headers' => array('X-aws-ec2-metadata-token-ttl-seconds' => '21600'),
-            'timeout' => 2,
-        ));
+        // キャッシュをチェック
+        $cached = get_transient(self::TRANSIENT_IMDS_IDENTITY);
+        if ($cached !== false) {
+            return $cached;
+        }
 
-        if (is_wp_error($token_response)) {
+        // 失敗キャッシュをチェック（EC2以外の環境で無駄なリクエストを避ける）
+        if (get_transient(self::TRANSIENT_IMDS_FAILED) !== false) {
             return array();
         }
 
-        $token_status = wp_remote_retrieve_response_code($token_response);
-        if ($token_status !== 200) {
-            return array();
-        }
-
-        $token = wp_remote_retrieve_body($token_response);
-        if (empty($token)) {
+        // IMDSv2トークンを取得
+        $token = $this->get_imds_token();
+        if ($token === null) {
+            // 失敗をキャッシュ
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return array();
         }
 
         // トークンを使ってメタデータを取得
-        $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document', array(
+        $response = wp_remote_get(self::IMDS_BASE_URL . '/latest/dynamic/instance-identity/document', array(
             'headers' => array('X-aws-ec2-metadata-token' => $token),
-            'timeout' => 2,
+            'timeout' => self::IMDS_TIMEOUT,
         ));
 
-        if (is_wp_error($response)) {
-            return array();
-        }
-
-        $status = wp_remote_retrieve_response_code($response);
-        if ($status !== 200) {
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return array();
         }
 
         $body = wp_remote_retrieve_body($response);
         $data = json_decode($body, true);
 
-        return is_array($data) ? $data : array();
+        if (!is_array($data) || json_last_error() !== JSON_ERROR_NONE) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return array();
+        }
+
+        // 成功をキャッシュ
+        set_transient(self::TRANSIENT_IMDS_IDENTITY, $data, self::IMDS_IDENTITY_CACHE_DURATION);
+        return $data;
+    }
+
+    /**
+     * EC2インスタンスロールから一時的な認証情報を取得する（IMDSv2対応、キャッシュ付き）
+     *
+     * 認証情報の有効期限を考慮してキャッシュします。
+     * 有効期限の5分前に新しい認証情報を取得します。
+     *
+     * @return array|null 認証情報配列（AccessKeyId, SecretAccessKey, Token, Expiration）、または取得失敗時はnull
+     */
+    private function get_instance_credentials()
+    {
+        // キャッシュをチェック
+        $cached = get_transient(self::TRANSIENT_IMDS_CREDENTIALS);
+        if ($cached !== false) {
+            // 有効期限の5分前かどうかをチェック
+            if (isset($cached['Expiration'])) {
+                $expiration = strtotime($cached['Expiration']);
+                $now = time();
+                // 有効期限の5分前より早ければキャッシュを使用
+                if ($expiration - $now > 300) {
+                    return $cached;
+                }
+                // 有効期限が近いのでキャッシュを削除して再取得
+                delete_transient(self::TRANSIENT_IMDS_CREDENTIALS);
+            } else {
+                return $cached;
+            }
+        }
+
+        // 失敗キャッシュをチェック
+        if (get_transient(self::TRANSIENT_IMDS_FAILED) !== false) {
+            return null;
+        }
+
+        // IMDSv2トークンを取得
+        $token = $this->get_imds_token();
+        if ($token === null) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        // IAMロール名を取得
+        $role_response = wp_remote_get(self::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/', array(
+            'headers' => array('X-aws-ec2-metadata-token' => $token),
+            'timeout' => self::IMDS_TIMEOUT,
+        ));
+
+        if (is_wp_error($role_response) || wp_remote_retrieve_response_code($role_response) !== 200) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        $role_name = trim(wp_remote_retrieve_body($role_response));
+        if (empty($role_name)) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        // 認証情報を取得
+        $creds_response = wp_remote_get(self::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/' . $role_name, array(
+            'headers' => array('X-aws-ec2-metadata-token' => $token),
+            'timeout' => self::IMDS_TIMEOUT,
+        ));
+
+        if (is_wp_error($creds_response) || wp_remote_retrieve_response_code($creds_response) !== 200) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        $creds = json_decode(wp_remote_retrieve_body($creds_response), true);
+
+        if (json_last_error() !== JSON_ERROR_NONE || empty($creds['AccessKeyId'])) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        $credentials = array(
+            'AccessKeyId' => $creds['AccessKeyId'],
+            'SecretAccessKey' => $creds['SecretAccessKey'],
+            'Token' => $creds['Token'],
+            'Expiration' => isset($creds['Expiration']) ? $creds['Expiration'] : null
+        );
+
+        // 有効期限に基づいてキャッシュ期間を計算（有効期限の5分前まで）
+        $cache_duration = self::IMDS_IDENTITY_CACHE_DURATION;
+        if (isset($creds['Expiration'])) {
+            $expiration = strtotime($creds['Expiration']);
+            $now = time();
+            $time_until_expiry = $expiration - $now - 300; // 5分のマージン
+            if ($time_until_expiry > 0) {
+                $cache_duration = min($cache_duration, $time_until_expiry);
+            }
+        }
+
+        set_transient(self::TRANSIENT_IMDS_CREDENTIALS, $credentials, $cache_duration);
+        return $credentials;
     }
 
     /**
