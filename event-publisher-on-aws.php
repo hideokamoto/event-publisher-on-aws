@@ -881,7 +881,10 @@ class EventBridgePostEvents
 
         $creds = json_decode(wp_remote_retrieve_body($creds_response), true);
 
-        if (json_last_error() !== JSON_ERROR_NONE || empty($creds['AccessKeyId'])) {
+        if (json_last_error() !== JSON_ERROR_NONE ||
+            empty($creds['AccessKeyId']) ||
+            empty($creds['SecretAccessKey']) ||
+            !isset($creds['Token'])) {
             set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return null;
         }
@@ -890,7 +893,7 @@ class EventBridgePostEvents
             'AccessKeyId' => $creds['AccessKeyId'],
             'SecretAccessKey' => $creds['SecretAccessKey'],
             'Token' => $creds['Token'],
-            'Expiration' => isset($creds['Expiration']) ? $creds['Expiration'] : null
+            'Expiration' => isset($creds['Expiration']) ? $creds['Expiration'] : null,
         );
 
         // 有効期限に基づいてキャッシュ期間を計算（有効期限の5分前まで）
