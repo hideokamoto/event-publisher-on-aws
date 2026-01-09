@@ -1619,17 +1619,20 @@ class EventBridgePostEvents
  */
 function eventbridge_post_events_activate()
 {
-    // Initialize metrics with default values
+    // Initialize metrics with default values (matching EventBridgePostEvents class structure)
     $default_metrics = array(
         'successful_events' => 0,
-        'failed_events' => 0
+        'failed_events' => 0,
+        'transient_failures' => 0,
+        'permanent_failures' => 0
     );
     add_option('eventbridge_metrics', $default_metrics, '', false);
 
-    // Initialize settings with default values
+    // Initialize settings with default values (matching EventBridgePostEvents class structure)
     $default_settings = array(
         'event_format' => 'envelope',
-        'send_mode' => 'async'
+        'send_mode' => 'async',
+        'enabled_post_types' => array('post')
     );
     add_option('eventbridge_settings', $default_settings, '', true);
 
