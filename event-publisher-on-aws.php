@@ -41,16 +41,9 @@ class EventBridgePutEvents
         $path = '/';
 
         // Encode Detail field using wp_json_encode and check for failures
-        $detail_json = wp_json_encode($detail);
-        if ($detail_json === false) {
-            $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
-            $errorMsg = sprintf(
-                'Failed to JSON encode Detail field for DetailType=%s, PostID=%s (possibly invalid UTF-8 or deeply nested data)',
-                $detailType,
-                $postId
-            );
-            error_log('[EventBridge] ' . $errorMsg);
-            return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
+        $detail_json = $this->encode_and_validate($detail, 'Detail field', $detailType, $detail);
+        if (is_array($detail_json)) {
+            return $detail_json; // Error response
         }
 
         // Build the EventBridge envelope
@@ -66,18 +59,9 @@ class EventBridgePutEvents
         );
 
         // Encode outer payload using wp_json_encode and check for failures
-        $payload = wp_json_encode($envelope);
-
-        // Validate final envelope size (256KB EventBridge limit per request)
-        if ($payload === false) {
-            $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
-            $errorMsg = sprintf(
-                'Failed to JSON encode EventBridge envelope for DetailType=%s, PostID=%s',
-                $detailType,
-                $postId
-            );
-            error_log('[EventBridge] ' . $errorMsg);
-            return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
+        $payload = $this->encode_and_validate($envelope, 'EventBridge envelope', $detailType, $detail);
+        if (is_array($payload)) {
+            return $payload; // Error response
         }
 
         $payload_size = strlen($payload);
@@ -361,6 +345,38 @@ class EventBridgePutEvents
 
         // Return array format for metrics tracking compatibility
         return array('success' => false, 'error' => $lastError, 'response' => null, 'is_transient' => $isLastErrorTransient);
+    }
+
+    /**
+     * Encode data to JSON and return error response if encoding fails
+     *
+     * @param mixed $data Data to encode
+     * @param string $context Context description (e.g., "Detail field", "EventBridge envelope")
+     * @param string $detailType Event detail type for error logging
+     * @param array $detail Event detail for extracting post ID
+     * @return array|string Array with error response if encoding fails, JSON string on success
+     */
+    private function encode_and_validate($data, $context, $detailType, $detail)
+    {
+        $json = wp_json_encode($data);
+        if ($json === false) {
+            $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
+            $errorMsg = sprintf(
+                'Failed to JSON encode %s for DetailType=%s, PostID=%s',
+                $context,
+                $detailType,
+                $postId
+            );
+
+            // Add additional context for Detail field
+            if ($context === 'Detail field') {
+                $errorMsg .= ' (possibly invalid UTF-8 or deeply nested data)';
+            }
+
+            error_log('[EventBridge] ' . $errorMsg);
+            return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
+        }
+        return $json;
     }
 
     private function getSignatureKey($dateStamp)
