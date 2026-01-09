@@ -160,6 +160,12 @@ class EventBridgePutEvents
         $method = 'POST';
         $path = '/';
 
+        // Encode Detail field using wp_json_encode and check for failures
+        $detail_json = $this->encode_and_validate($detail, 'Detail field', $detailType, $detail);
+        if (is_array($detail_json)) {
+            return $detail_json; // Error response
+        }
+
         // Build the EventBridge envelope
         $envelope = array(
             'Entries' => array(
@@ -167,24 +173,15 @@ class EventBridgePutEvents
                     'EventBusName' => EVENT_BUS_NAME,
                     'Source' => $source,
                     'DetailType' => $detailType,
-                    'Detail' => json_encode($detail),
+                    'Detail' => $detail_json,
                 ),
             ),
         );
 
-        $payload = json_encode($envelope);
-
-        // Validate final envelope size (256KB EventBridge limit per request)
-        if ($payload === false) {
-            $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
-            $errorMsg = sprintf(
-                'Failed to JSON encode EventBridge envelope for DetailType=%s, PostID=%s: %s',
-                $detailType,
-                $postId,
-                json_last_error_msg()
-            );
-            error_log('[EventBridge] ' . $errorMsg);
-            return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
+        // Encode outer payload using wp_json_encode and check for failures
+        $payload = $this->encode_and_validate($envelope, 'EventBridge envelope', $detailType, $detail);
+        if (is_array($payload)) {
+            return $payload; // Error response
         }
 
         $payload_size = strlen($payload);
@@ -192,7 +189,7 @@ class EventBridgePutEvents
 
         if ($payload_size > $max_payload_size) {
             $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
-            $detail_size = strlen(json_encode($detail));
+            $detail_size = strlen(wp_json_encode($detail));
             $errorMsg = sprintf(
                 'EventBridge envelope exceeds 256KB limit: PostID=%s, EnvelopeSize=%d bytes, DetailSize=%d bytes, DetailType=%s',
                 $postId,
@@ -468,6 +465,38 @@ class EventBridgePutEvents
 
         // Return array format for metrics tracking compatibility
         return array('success' => false, 'error' => $lastError, 'response' => null, 'is_transient' => $isLastErrorTransient);
+    }
+
+    /**
+     * Encode data to JSON and return error response if encoding fails
+     *
+     * @param mixed $data Data to encode
+     * @param string $context Context description (e.g., "Detail field", "EventBridge envelope")
+     * @param string $detailType Event detail type for error logging
+     * @param array $detail Event detail for extracting post ID
+     * @return array|string Array with error response if encoding fails, JSON string on success
+     */
+    private function encode_and_validate($data, $context, $detailType, $detail)
+    {
+        $json = wp_json_encode($data);
+        if ($json === false) {
+            $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
+            $errorMsg = sprintf(
+                'Failed to JSON encode %s for DetailType=%s, PostID=%s',
+                $context,
+                $detailType,
+                $postId
+            );
+
+            // Add additional context for Detail field
+            if ($context === 'Detail field') {
+                $errorMsg .= ' (possibly invalid UTF-8 or deeply nested data)';
+            }
+
+            error_log('[EventBridge] ' . $errorMsg);
+            return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
+        }
+        return $json;
     }
 
     private function getSignatureKey($dateStamp)
