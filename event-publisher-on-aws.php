@@ -106,8 +106,8 @@ class EventBridgePutEvents
         // Check if verbose logging is enabled (DRY principle)
         $verboseLogging = defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG;
 
-        // Extract post ID from detail if available
-        $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
+        // Extract post ID from detail if available (handle both legacy and envelope formats)
+        $postId = $detail['id'] ?? ($detail['data']['id'] ?? 'N/A');
 
         // Retry loop with exponential backoff
         for ($attempt = 0; $attempt <= $maxRetries; $attempt++) {
@@ -1139,7 +1139,8 @@ class EventBridgePostEvents
      */
     public function handle_send_failure($source, $detailType, $detail)
     {
-        $postId = isset($detail['id']) ? $detail['id'] : null;
+        // Extract post ID from detail (handle both legacy and envelope formats)
+        $postId = $detail['id'] ?? ($detail['data']['id'] ?? null);
         if ($postId) {
             // 失敗イベントをログに記録（監視・アラート用）
             error_log(sprintf(
@@ -1202,7 +1203,7 @@ class EventBridgePostEvents
                 esc_html__('リージョン検出警告:', 'eventbridge-post-events'),
                 sprintf(
                     esc_html__('EVENT_BRIDGE_REGION定数とEC2メタデータからリージョンを検出できませんでした。デフォルトの「%s」を使用します。', 'eventbridge-post-events'),
-                    $this->region
+                    esc_html($this->region)
                 )
             );
         }
