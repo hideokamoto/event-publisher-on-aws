@@ -108,18 +108,26 @@ jobs:
 
       - name: Verify composer.json has no production dependencies
         run: |
-          # Check that composer.json only has require-dev, not require
-          if grep -q '"require"[[:space:]]*:[[:space:]]*{' composer.json; then
-            # Check if require section has any dependencies (ignoring empty or PHP version only)
-            REQUIRE_CONTENT=$(sed -n '/"require"[[:space:]]*:[[:space:]]*{/,/}/p' composer.json | grep -v '"require"' | grep -v '^[[:space:]]*}' | grep -v 'php')
-            if [ ! -z "$REQUIRE_CONTENT" ]; then
+          # Check that composer.json require section is empty or only has PHP version
+          # Extract the line with "require" (not "require-dev")
+          REQUIRE_LINE=$(grep -E '^\s*"require"\s*:\s*\{' composer.json || true)
+
+          if [ ! -z "$REQUIRE_LINE" ]; then
+            # Check if it's an empty object: "require": {} or "require": {},
+            if echo "$REQUIRE_LINE" | grep -qE '^\s*"require"\s*:\s*\{\s*\}'; then
+              echo "✓ Verified: 'require' section is empty"
+            else
+              # If not empty, check what's inside (should only be php version if anything)
+              # This is more complex, so let's just verify it matches the pattern: "require": {}
               echo "ERROR: composer.json contains production dependencies in 'require' section"
               echo "This plugin must use ONLY dev dependencies (require-dev)"
-              echo "Found: $REQUIRE_CONTENT"
+              echo "The 'require' section must be empty: \"require\": {}"
+              echo "Found: $REQUIRE_LINE"
               exit 1
             fi
+          else
+            echo "✓ Verified: no 'require' section found (only require-dev)"
           fi
-          echo "✓ Verified: composer.json contains only dev dependencies"
 
       - name: Verify vendor directory is in .gitignore
         run: |
