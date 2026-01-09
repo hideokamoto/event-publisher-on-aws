@@ -332,10 +332,6 @@ class EventBridgePostEvents
     private $successful_events = 0;
     private $failed_events = 0;
 
-    // IMDSv2 token caching
-    private $imdsv2_token = null;
-    private $imdsv2_token_expiry = 0;
-
     // Credential source tracking for admin notices
     private $credential_source = null;
     private $region_source = null;
@@ -346,6 +342,16 @@ class EventBridgePostEvents
     const OPTION_SETTINGS = 'eventbridge_settings';
     const TRANSIENT_NOTICE_DISMISSED = 'eventbridge_notice_dismissed';
     const FAILURE_THRESHOLD = 5; // Number of failures before showing admin notice
+
+    // IMDS cache transient keys
+    const TRANSIENT_IMDS_TOKEN = 'eventbridge_imds_token';
+    const TRANSIENT_IMDS_IDENTITY = 'eventbridge_imds_identity';
+    const TRANSIENT_IMDS_FAILED = 'eventbridge_imds_failed';
+
+    // IMDS cache durations
+    const IMDS_TOKEN_CACHE_DURATION = 21000; // 5h50m (10 min before 6h expiry for safety)
+    const IMDS_IDENTITY_CACHE_DURATION = 3600; // 1 hour for successful lookups
+    const IMDS_FAILED_CACHE_DURATION = 300;    // 5 minutes for failed lookups
 
     // Valid setting values
     const VALID_EVENT_FORMATS = array('legacy', 'envelope');
@@ -423,6 +429,8 @@ class EventBridgePostEvents
      * Validate and detect AWS region
      * Resolution order: EVENT_BRIDGE_REGION constant → EC2 metadata → 'us-east-1' default
      *
+     * IMDS is only attempted in admin or wp-cron contexts to avoid frontend performance impact.
+     *
      * @return array Array with 'region' and 'source'
      */
     private function get_aws_region()
@@ -443,25 +451,34 @@ class EventBridgePostEvents
             }
         }
 
-        // Try EC2 instance metadata
-        $identity = $this->get_instance_identity();
-        if (isset($identity['region']) && !empty($identity['region'])) {
-            $region = $identity['region'];
-            if ($this->validate_region_format($region)) {
-                return array(
-                    'region' => $region,
-                    'source' => 'metadata'
-                );
-            } else {
-                error_log(sprintf(
-                    '[EventBridge] Region from metadata has invalid format: %s',
-                    $region
-                ));
+        // Only try IMDS in admin or wp-cron contexts to avoid frontend performance impact
+        $should_try_imds = is_admin() || (defined('DOING_CRON') && DOING_CRON);
+
+        if ($should_try_imds) {
+            // Try EC2 instance metadata
+            $identity = $this->get_instance_identity();
+            if (isset($identity['region']) && !empty($identity['region'])) {
+                $region = $identity['region'];
+                if ($this->validate_region_format($region)) {
+                    return array(
+                        'region' => $region,
+                        'source' => 'metadata'
+                    );
+                } else {
+                    error_log(sprintf(
+                        '[EventBridge] Region from metadata has invalid format: %s',
+                        $region
+                    ));
+                }
             }
         }
 
         // Fallback to us-east-1
-        error_log('[EventBridge] Using fallback region: us-east-1');
+        if (!$should_try_imds) {
+            error_log('[EventBridge] Skipping IMDS on frontend, using fallback region: us-east-1');
+        } else {
+            error_log('[EventBridge] Using fallback region: us-east-1');
+        }
         return array(
             'region' => 'us-east-1',
             'source' => 'fallback'
@@ -854,19 +871,17 @@ class EventBridgePostEvents
     }
 
     /**
-     * Retrieve IMDSv2 token with caching and automatic refresh
-     * Token has 6-hour TTL, refreshed when within 5 minutes of expiry
+     * Retrieve IMDSv2 token with persistent transient caching
+     * Token has 6-hour TTL, cached for 5h50m to ensure fresh token
      *
      * @return string|null IMDSv2 token or null on failure
      */
     private function get_imdsv2_token()
     {
-        $current_time = time();
-        $refresh_threshold = 300; // 5 minutes in seconds
-
-        // Return cached token if still valid (not within 5 minutes of expiry)
-        if ($this->imdsv2_token !== null && ($this->imdsv2_token_expiry - $current_time) > $refresh_threshold) {
-            return $this->imdsv2_token;
+        // Check transient cache first (persists across requests)
+        $cached_token = get_transient(self::TRANSIENT_IMDS_TOKEN);
+        if ($cached_token !== false && !empty($cached_token)) {
+            return $cached_token;
         }
 
         // Request new token with 6-hour TTL (21600 seconds)
@@ -875,12 +890,12 @@ class EventBridgePostEvents
             'headers' => array(
                 'X-aws-ec2-metadata-token-ttl-seconds' => '21600'
             ),
-            'timeout' => 5
+            'timeout' => 2
         ));
 
         if (is_wp_error($response)) {
             error_log(sprintf(
-                '[EventBridge] IMDSv2 token retrieval failed: %s. Falling back to IMDSv1.',
+                '[EventBridge] IMDSv2 token retrieval failed: %s',
                 $response->get_error_message()
             ));
             return null;
@@ -889,7 +904,7 @@ class EventBridgePostEvents
         $status_code = wp_remote_retrieve_response_code($response);
         if ($status_code !== 200) {
             error_log(sprintf(
-                '[EventBridge] IMDSv2 token retrieval returned HTTP %d. Falling back to IMDSv1.',
+                '[EventBridge] IMDSv2 token retrieval returned HTTP %d',
                 $status_code
             ));
             return null;
@@ -897,44 +912,59 @@ class EventBridgePostEvents
 
         $token = wp_remote_retrieve_body($response);
         if (empty($token)) {
-            error_log('[EventBridge] IMDSv2 token is empty. Falling back to IMDSv1.');
+            error_log('[EventBridge] IMDSv2 token is empty');
             return null;
         }
 
-        // Cache token with expiry timestamp
-        $this->imdsv2_token = $token;
-        $this->imdsv2_token_expiry = $current_time + 21600; // 6 hours
+        // Cache token in transient for 5h50m (safe margin before 6h expiry)
+        set_transient(self::TRANSIENT_IMDS_TOKEN, $token, self::IMDS_TOKEN_CACHE_DURATION);
 
         return $token;
     }
 
     /**
-     * インスタンスメタデータから識別情報を取得する (IMDSv2 with IMDSv1 fallback)
+     * インスタンスメタデータから識別情報を取得する (IMDSv2 with transient caching)
+     *
+     * Uses persistent caching to avoid repeated timeouts on non-EC2 hosts.
+     * Caches both successful results (1 hour) and failures (5 minutes).
      *
      * @return array インスタンス識別情報
      */
     private function get_instance_identity()
     {
-        // Try to get IMDSv2 token first
-        $token = $this->get_imdsv2_token();
-
-        $request_args = array(
-            'timeout' => 5
-        );
-
-        // Use IMDSv2 if token is available
-        if ($token !== null) {
-            $request_args['headers'] = array(
-                'X-aws-ec2-metadata-token' => $token
-            );
+        // Check success cache first (persists across requests)
+        $cached = get_transient(self::TRANSIENT_IMDS_IDENTITY);
+        if ($cached !== false) {
+            return $cached;
         }
 
-        $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document', $request_args);
+        // Check failure cache to avoid repeated timeouts (short-circuit for non-EC2)
+        if (get_transient(self::TRANSIENT_IMDS_FAILED) !== false) {
+            return array();
+        }
+
+        // Try to get IMDSv2 token
+        $token = $this->get_imdsv2_token();
+        if ($token === null) {
+            // Cache failure for 5 minutes to prevent repeated timeout attempts
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return array();
+        }
+
+        // Request instance identity document with IMDSv2 token
+        $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document', array(
+            'headers' => array(
+                'X-aws-ec2-metadata-token' => $token
+            ),
+            'timeout' => 2
+        ));
+
         if (is_wp_error($response)) {
             error_log(sprintf(
                 '[EventBridge] Instance identity retrieval failed: %s',
                 $response->get_error_message()
             ));
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return array();
         }
 
@@ -944,6 +974,7 @@ class EventBridgePostEvents
                 '[EventBridge] Instance identity returned HTTP %d',
                 $status_code
             ));
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return array();
         }
 
@@ -951,11 +982,14 @@ class EventBridgePostEvents
         $identity = json_decode($body, true);
 
         // Validate that identity is a valid array and region is not null/empty
-        if (!is_array($identity) || !isset($identity['region']) || empty($identity['region'])) {
-            error_log('[EventBridge] Instance identity document is invalid or region is missing');
+        if (!is_array($identity) || json_last_error() !== JSON_ERROR_NONE) {
+            error_log('[EventBridge] Instance identity document has invalid JSON');
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return array();
         }
 
+        // Cache successful result for 1 hour
+        set_transient(self::TRANSIENT_IMDS_IDENTITY, $identity, self::IMDS_IDENTITY_CACHE_DURATION);
         return $identity;
     }
 
