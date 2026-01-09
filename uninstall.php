@@ -54,7 +54,7 @@ function eventbridge_post_events_uninstall_remove_post_meta()
 function eventbridge_post_events_uninstall_clear_scheduled_events()
 {
     // Get all scheduled cron events
-    $cron_array = _get_cron_array();
+    $cron_array = get_option('cron');
 
     if (is_array($cron_array)) {
         foreach ($cron_array as $timestamp => $cron) {
@@ -66,9 +66,6 @@ function eventbridge_post_events_uninstall_clear_scheduled_events()
             }
         }
     }
-
-    // Also clear any other potential EventBridge-related hooks
-    wp_clear_scheduled_hook('eventbridge_async_send_event');
 }
 
 /**

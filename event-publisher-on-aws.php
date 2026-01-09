@@ -8,6 +8,11 @@ Author: Your Name
 Author URI: https://example.com
 */
 
+// Define plugin file constant for reliable reference
+if (!defined('EVENTBRIDGE_POST_EVENTS_FILE')) {
+    define('EVENTBRIDGE_POST_EVENTS_FILE', __FILE__);
+}
+
 // EventBridge設定
 define('EVENT_BUS_NAME', 'wp-kyoto'); // デフォルトのイベントバスを使用する場合
 define('EVENT_SOURCE_NAME', 'wordpress'); // デフォルトのイベントバスを使用する場合
@@ -1060,7 +1065,7 @@ function eventbridge_post_events_activate()
     if (!empty($activation_errors)) {
         update_option('eventbridge_activation_errors', $activation_errors, false);
         // Deactivate the plugin if there are critical errors
-        deactivate_plugins(plugin_basename(__FILE__));
+        deactivate_plugins(plugin_basename(EVENTBRIDGE_POST_EVENTS_FILE));
         wp_die(
             '<h1>EventBridge Post Events - Activation Failed</h1>' .
             '<p><strong>The following errors prevented plugin activation:</strong></p>' .
@@ -1089,7 +1094,7 @@ function eventbridge_post_events_deactivate()
     // Clear all scheduled single events for async EventBridge sending
     // WordPress doesn't provide a direct way to get all scheduled events by hook,
     // so we need to check the cron array
-    $cron_array = _get_cron_array();
+    $cron_array = get_option('cron');
 
     if (is_array($cron_array)) {
         foreach ($cron_array as $timestamp => $cron) {
@@ -1116,8 +1121,8 @@ function eventbridge_post_events_deactivate()
 }
 
 // Register lifecycle hooks
-register_activation_hook(__FILE__, 'eventbridge_post_events_activate');
-register_deactivation_hook(__FILE__, 'eventbridge_post_events_deactivate');
+register_activation_hook(EVENTBRIDGE_POST_EVENTS_FILE, 'eventbridge_post_events_activate');
+register_deactivation_hook(EVENTBRIDGE_POST_EVENTS_FILE, 'eventbridge_post_events_deactivate');
 
 // インスタンスの作成
 new EventBridgePostEvents();
