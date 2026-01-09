@@ -33,7 +33,9 @@ class EventBridgePutEvents
     {
         $method = 'POST';
         $path = '/';
-        $payload = json_encode(array(
+
+        // Build the EventBridge envelope
+        $envelope = array(
             'Entries' => array(
                 array(
                     'EventBusName' => EVENT_BUS_NAME,
@@ -42,7 +44,39 @@ class EventBridgePutEvents
                     'Detail' => json_encode($detail),
                 ),
             ),
-        ));
+        );
+
+        $payload = json_encode($envelope);
+
+        // Validate final envelope size (256KB EventBridge limit per request)
+        if ($payload === false) {
+            $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
+            $errorMsg = sprintf(
+                'Failed to JSON encode EventBridge envelope for DetailType=%s, PostID=%s: %s',
+                $detailType,
+                $postId,
+                json_last_error_msg()
+            );
+            error_log('[EventBridge] ' . $errorMsg);
+            return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
+        }
+
+        $payload_size = strlen($payload);
+        $max_payload_size = 256 * 1024; // 256KB in bytes
+
+        if ($payload_size > $max_payload_size) {
+            $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
+            $detail_size = strlen(json_encode($detail));
+            $errorMsg = sprintf(
+                'EventBridge envelope exceeds 256KB limit: PostID=%s, EnvelopeSize=%d bytes, DetailSize=%d bytes, DetailType=%s',
+                $postId,
+                $payload_size,
+                $detail_size,
+                $detailType
+            );
+            error_log('[EventBridge] ' . $errorMsg);
+            return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
+        }
 
         $now = new DateTime();
         $amzDate = $now->format('Ymd\THis\Z');
@@ -752,9 +786,12 @@ class EventBridgePostEvents
 
                 // Final fallback if correlation_id is still empty
                 if (empty($correlation_id)) {
+                    // This can happen in a race condition where another process adds an empty meta value.
+                    // We'll generate a new UUID and attempt to save it.
                     $correlation_id = $this->generate_uuid_v4();
+                    update_post_meta($post_id, '_event_correlation_id', $correlation_id);
                     error_log(sprintf(
-                        '[EventBridge] Using fallback UUID for post ID %d: %s',
+                        '[EventBridge] Corrected empty correlation ID. Using fallback UUID for post ID %d: %s',
                         $post_id,
                         $correlation_id
                     ));
@@ -839,15 +876,12 @@ class EventBridgePostEvents
         if ($new_status === 'future') {
             // Scheduled post
             $event_name = 'post.scheduled';
-        } elseif ($new_status === 'publish' && $old_status === 'publish') {
-            // Update to already published post
+        } elseif ($old_status === 'publish') {
+            // Update to already published post (publish -> publish)
             $event_name = 'post.updated';
-        } elseif ($new_status === 'publish' && $old_status !== 'publish') {
+        } else {
             // New publish (from draft, future, etc.)
             $event_name = 'post.published';
-        } else {
-            // Fallback
-            $event_name = 'post.' . $new_status . 'ed';
         }
 
         // Safely get post properties with null checks
@@ -875,25 +909,14 @@ class EventBridgePostEvents
 
         $event_payload = $this->prepare_event_payload($event_data, $post->ID);
 
-        // Validate payload size before sending (256KB EventBridge limit)
+        // Early fast-fail: check if event payload can be JSON encoded
+        // Note: The authoritative size check happens in sendEvent() after building the full envelope
         $payload_json = json_encode($event_payload);
         if ($payload_json === false) {
             error_log(sprintf(
                 '[EventBridge] Failed to JSON encode event payload for post ID %d: %s',
                 $post->ID,
                 json_last_error_msg()
-            ));
-            return;
-        }
-
-        $payload_size = strlen($payload_json);
-        $max_payload_size = 256 * 1024; // 256KB in bytes
-
-        if ($payload_size > $max_payload_size) {
-            error_log(sprintf(
-                '[EventBridge] Event payload exceeds 256KB limit for post ID %d (size: %d bytes)',
-                $post->ID,
-                $payload_size
             ));
             return;
         }
