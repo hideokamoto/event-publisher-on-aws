@@ -8,22 +8,28 @@ Author: Your Name
 Author URI: https://example.com
 */
 
-// EventBridge設定
-define('EVENT_BUS_NAME', 'wp-kyoto'); // デフォルトのイベントバスを使用する場合
-define('EVENT_SOURCE_NAME', 'wordpress'); // デフォルトのイベントバスを使用する場合
+// EventBridge設定（wp-config.phpで上書き可能）
+if (!defined('EVENT_BUS_NAME')) {
+    define('EVENT_BUS_NAME', 'wp-kyoto');
+}
+if (!defined('EVENT_SOURCE_NAME')) {
+    define('EVENT_SOURCE_NAME', 'wordpress');
+}
 
 class EventBridgePutEvents
 {
     private $accessKeyId;
     private $secretAccessKey;
+    private $sessionToken;
     private $region;
     private $endpoint;
     private $serviceName;
 
-    public function __construct($accessKeyId, $secretAccessKey, $region)
+    public function __construct($accessKeyId, $secretAccessKey, $region, $sessionToken = null)
     {
         $this->accessKeyId = $accessKeyId;
         $this->secretAccessKey = $secretAccessKey;
+        $this->sessionToken = $sessionToken;
         $this->region = $region;
         $this->endpoint = 'events.' . $region . '.amazonaws.com';
         $this->serviceName = 'events';
@@ -37,17 +43,18 @@ class EventBridgePutEvents
         // Encode Detail field using wp_json_encode and check for failures
         $detail_json = wp_json_encode($detail);
         if ($detail_json === false) {
-            $error_msg = 'Failed to JSON encode Detail field (possibly invalid UTF-8 or deeply nested data)';
-            error_log(sprintf(
-                '[EventBridge] JSON encoding failed: %s, DetailType=%s',
-                $error_msg,
-                $detailType
-            ));
-            return array('success' => false, 'error' => $error_msg, 'response' => null);
+            $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
+            $errorMsg = sprintf(
+                'Failed to JSON encode Detail field for DetailType=%s, PostID=%s (possibly invalid UTF-8 or deeply nested data)',
+                $detailType,
+                $postId
+            );
+            error_log('[EventBridge] ' . $errorMsg);
+            return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
         }
 
-        // Encode outer payload using wp_json_encode and check for failures
-        $payload = wp_json_encode(array(
+        // Build the EventBridge envelope
+        $envelope = array(
             'Entries' => array(
                 array(
                     'EventBusName' => EVENT_BUS_NAME,
@@ -56,24 +63,52 @@ class EventBridgePutEvents
                     'Detail' => $detail_json,
                 ),
             ),
-        ));
+        );
 
+        // Encode outer payload using wp_json_encode and check for failures
+        $payload = wp_json_encode($envelope);
+
+        // Validate final envelope size (256KB EventBridge limit per request)
         if ($payload === false) {
-            $error_msg = 'Failed to JSON encode outer payload';
-            error_log(sprintf(
-                '[EventBridge] JSON encoding failed: %s, DetailType=%s',
-                $error_msg,
-                $detailType
-            ));
-            return array('success' => false, 'error' => $error_msg, 'response' => null);
+            $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
+            $errorMsg = sprintf(
+                'Failed to JSON encode EventBridge envelope for DetailType=%s, PostID=%s',
+                $detailType,
+                $postId
+            );
+            error_log('[EventBridge] ' . $errorMsg);
+            return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
         }
 
-        $now = new DateTime();
+        $payload_size = strlen($payload);
+        $max_payload_size = 256 * 1024; // 256KB in bytes
+
+        if ($payload_size > $max_payload_size) {
+            $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
+            $detail_size = strlen(wp_json_encode($detail));
+            $errorMsg = sprintf(
+                'EventBridge envelope exceeds 256KB limit: PostID=%s, EnvelopeSize=%d bytes, DetailSize=%d bytes, DetailType=%s',
+                $postId,
+                $payload_size,
+                $detail_size,
+                $detailType
+            );
+            error_log('[EventBridge] ' . $errorMsg);
+            return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
+        }
+
+        $now = new DateTime('now', new DateTimeZone('UTC'));
         $amzDate = $now->format('Ymd\THis\Z');
         $dateStamp = $now->format('Ymd');
 
-        $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-target:AWSEvents.PutEvents\n";
-        $signedHeaders = 'content-type;host;x-amz-date;x-amz-target';
+        // SessionTokenがある場合は署名対象のヘッダーに含める
+        if (!empty($this->sessionToken)) {
+            $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-security-token:{$this->sessionToken}\nx-amz-target:AWSEvents.PutEvents\n";
+            $signedHeaders = 'content-type;host;x-amz-date;x-amz-security-token;x-amz-target';
+        } else {
+            $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-target:AWSEvents.PutEvents\n";
+            $signedHeaders = 'content-type;host;x-amz-date;x-amz-target';
+        }
         $canonicalRequest = implode("\n", array(
             $method,
             $path,
@@ -102,6 +137,11 @@ class EventBridgePutEvents
             'X-Amz-Target' => 'AWSEvents.PutEvents',
             'Authorization' => $authorizationHeader,
         );
+
+        // SessionTokenがある場合はヘッダーに追加
+        if (!empty($this->sessionToken)) {
+            $headers['X-Amz-Security-Token'] = $this->sessionToken;
+        }
 
         // Retry configuration
         $maxRetries = 3;
@@ -136,6 +176,8 @@ class EventBridgePutEvents
                 'method' => $method,
                 'headers' => $headers,
                 'body' => $payload,
+                'timeout' => 10,
+                'sslverify' => true,
             ));
 
             // Check if wp_remote_request returned a WP_Error
@@ -205,6 +247,24 @@ class EventBridgePutEvents
                 } else {
                     // Success - status code is 2xx
                     $data = json_decode($responseBody, true);
+
+                    // JSONデコードエラーのハンドリング
+                    if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
+                        $lastError = sprintf('Invalid JSON response: %s', json_last_error_msg());
+                        $lastResponseCode = 'JSONError';
+
+                        if ($verboseLogging) {
+                            error_log(sprintf(
+                                '[EventBridge] JSON decode error on attempt %d: %s, Body: %s',
+                                $attempt + 1,
+                                $lastError,
+                                substr($responseBody, 0, 500)
+                            ));
+                        }
+
+                        // JSONエラーは通常リトライ可能ではないので、ループを抜ける
+                        break;
+                    }
 
                     // Check for partial failures in PutEvents response
                     $failedCount = isset($data['FailedEntryCount']) ? (int)$data['FailedEntryCount'] : 0;
@@ -276,21 +336,31 @@ class EventBridgePutEvents
             }
         }
 
+        // Determine if the last error was transient based on response code
+        $isLastErrorTransient = false;
+        if (is_int($lastResponseCode)) {
+            $isLastErrorTransient = ($lastResponseCode >= 500 && $lastResponseCode < 600) || $lastResponseCode === 429;
+        } elseif ($lastResponseCode === 'WP_Error' || $lastResponseCode === 'PartialFailure') {
+            // WP_Error and PartialFailure are considered transient
+            $isLastErrorTransient = true;
+        }
+
         // All retries exhausted - log comprehensive error details (excluding sensitive event data)
         error_log(sprintf(
-            '[EventBridge] FAILED after %d attempts - DetailType: %s, PostID: %s, LastError: %s, LastResponseCode: %s, Region: %s, EventBus: %s, Timestamp: %s',
+            '[EventBridge] FAILED after %d attempts - DetailType: %s, PostID: %s, LastError: %s, LastResponseCode: %s, IsTransient: %s, Region: %s, EventBus: %s, Timestamp: %s',
             $maxRetries + 1,
             $detailType,
             $postId,
             $lastError,
             $lastResponseCode,
+            $isLastErrorTransient ? 'yes' : 'no',
             $this->region,
             EVENT_BUS_NAME,
             $timestamp
         ));
 
         // Return array format for metrics tracking compatibility
-        return array('success' => false, 'error' => $lastError, 'response' => null);
+        return array('success' => false, 'error' => $lastError, 'response' => null, 'is_transient' => $isLastErrorTransient);
     }
 
     private function getSignatureKey($dateStamp)
@@ -314,6 +384,8 @@ class EventBridgePostEvents
     // In-memory counters for tracking metrics
     private $successful_events = 0;
     private $failed_events = 0;
+    private $transient_failures = 0;
+    private $permanent_failures = 0;
 
     // WordPress options keys for persistent storage (non-autoload for performance)
     const OPTION_METRICS = 'eventbridge_metrics';
@@ -321,6 +393,17 @@ class EventBridgePostEvents
     const OPTION_SETTINGS = 'eventbridge_settings';
     const TRANSIENT_NOTICE_DISMISSED = 'eventbridge_notice_dismissed';
     const FAILURE_THRESHOLD = 5; // Number of failures before showing admin notice
+
+    // IMDS cache transient keys
+    const TRANSIENT_IMDS_IDENTITY = 'eventbridge_imds_identity';
+    const TRANSIENT_IMDS_CREDENTIALS = 'eventbridge_imds_credentials';
+    const TRANSIENT_IMDS_FAILED = 'eventbridge_imds_failed';
+
+    // IMDS configuration
+    const IMDS_BASE_URL = 'http://169.254.169.254';
+    const IMDS_TIMEOUT = 2;
+    const IMDS_IDENTITY_CACHE_DURATION = 3600; // 1 hour for successful lookups
+    const IMDS_FAILED_CACHE_DURATION = 300;    // 5 minutes for failed lookups
 
     // Valid setting values
     const VALID_EVENT_FORMATS = array('legacy', 'envelope');
@@ -339,21 +422,58 @@ class EventBridgePostEvents
         add_action('admin_init', array($this, 'register_settings'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_styles'));
 
-        // AWS認証情報の検証（定義されていて、空の値ではないか確認）
-        if (empty(constant('AWS_EVENTBRIDGE_ACCESS_KEY_ID')) || empty(constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY'))) {
+        $access_key = null;
+        $secret_key = null;
+        $session_token = null;
+
+        // 認証情報の取得: 1. 定数から、2. インスタンスロールから
+        if (defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') &&
+            defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY') &&
+            !empty(AWS_EVENTBRIDGE_ACCESS_KEY_ID) &&
+            !empty(AWS_EVENTBRIDGE_SECRET_ACCESS_KEY)) {
+            // 定数から静的認証情報を取得
+            $access_key = AWS_EVENTBRIDGE_ACCESS_KEY_ID;
+            $secret_key = AWS_EVENTBRIDGE_SECRET_ACCESS_KEY;
+        } else {
+            // 定数が未定義の場合、EC2インスタンスロールから取得
+            $instance_creds = $this->get_instance_credentials();
+            if ($instance_creds !== null) {
+                $access_key = $instance_creds['AccessKeyId'];
+                $secret_key = $instance_creds['SecretAccessKey'];
+                $session_token = $instance_creds['Token'];
+            }
+        }
+
+        // 認証情報が取得できない場合のみエラー
+        if (empty($access_key) || empty($secret_key)) {
             add_action('admin_notices', function() {
                 ?>
                 <div class="notice notice-error">
-                    <p><?php esc_html_e('EventBridge Post Events: AWS認証情報が設定されていません。wp-config.phpでAWS_EVENTBRIDGE_ACCESS_KEY_IDとAWS_EVENTBRIDGE_SECRET_ACCESS_KEY定数を定義してください。', 'eventbridge-post-events'); ?></p>
+                    <p><?php esc_html_e('EventBridge Post Events: AWS認証情報が設定されていません。wp-config.phpで定数を定義するか、EC2インスタンスロールを設定してください。', 'eventbridge-post-events'); ?></p>
                 </div>
                 <?php
             });
             return;
         }
 
+        // リージョンの取得（EC2インスタンスメタデータ、または定数からのフォールバック）
         $identity = $this->get_instance_identity();
-        $this->region = $identity['region'];
-        $this->client = new EventBridgePutEvents(AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY, $this->region);
+        if (!empty($identity['region'])) {
+            $this->region = $identity['region'];
+        } elseif (defined('AWS_EVENTBRIDGE_REGION') && !empty(AWS_EVENTBRIDGE_REGION)) {
+            $this->region = AWS_EVENTBRIDGE_REGION;
+        } else {
+            add_action('admin_notices', function() {
+                ?>
+                <div class="notice notice-error">
+                    <p><?php esc_html_e('EventBridge Post Events: AWSリージョンを特定できません。EC2以外の環境では、wp-config.phpでAWS_EVENTBRIDGE_REGION定数を定義してください。', 'eventbridge-post-events'); ?></p>
+                </div>
+                <?php
+            });
+            return;
+        }
+
+        $this->client = new EventBridgePutEvents($access_key, $secret_key, $this->region, $session_token);
 
         // Load metrics from WordPress options
         $this->load_metrics();
@@ -668,7 +788,12 @@ class EventBridgePostEvents
 
             <?php
             // Display current metrics
-            $metrics = get_option(self::OPTION_METRICS, array('successful_events' => 0, 'failed_events' => 0));
+            $metrics = get_option(self::OPTION_METRICS, array(
+                'successful_events' => 0,
+                'failed_events' => 0,
+                'transient_failures' => 0,
+                'permanent_failures' => 0
+            ));
             ?>
             <div class="card" style="max-width:600px;margin-bottom:20px;">
                 <h2><?php esc_html_e('送信統計', 'eventbridge-post-events'); ?></h2>
@@ -680,6 +805,14 @@ class EventBridgePostEvents
                     <tr>
                         <th><?php esc_html_e('失敗', 'eventbridge-post-events'); ?></th>
                         <td><strong style="color:<?php echo $metrics['failed_events'] > 0 ? 'red' : 'inherit'; ?>;"><?php echo esc_html($metrics['failed_events']); ?></strong></td>
+                    </tr>
+                    <tr>
+                        <th style="padding-left:20px;"><?php esc_html_e('└ 一時的な失敗', 'eventbridge-post-events'); ?></th>
+                        <td><strong style="color:orange;"><?php echo esc_html(isset($metrics['transient_failures']) ? $metrics['transient_failures'] : 0); ?></strong> <span class="description">(リトライ可能)</span></td>
+                    </tr>
+                    <tr>
+                        <th style="padding-left:20px;"><?php esc_html_e('└ 恒久的な失敗', 'eventbridge-post-events'); ?></th>
+                        <td><strong style="color:red;"><?php echo esc_html(isset($metrics['permanent_failures']) ? $metrics['permanent_failures'] : 0); ?></strong> <span class="description">(設定要確認)</span></td>
                     </tr>
                     <tr>
                         <th><?php esc_html_e('リージョン', 'eventbridge-post-events'); ?></th>
@@ -710,11 +843,15 @@ class EventBridgePostEvents
     {
         $metrics = get_option(self::OPTION_METRICS, array(
             'successful_events' => 0,
-            'failed_events' => 0
+            'failed_events' => 0,
+            'transient_failures' => 0,
+            'permanent_failures' => 0
         ));
 
         $this->successful_events = (int) $metrics['successful_events'];
         $this->failed_events = (int) $metrics['failed_events'];
+        $this->transient_failures = (int) (isset($metrics['transient_failures']) ? $metrics['transient_failures'] : 0);
+        $this->permanent_failures = (int) (isset($metrics['permanent_failures']) ? $metrics['permanent_failures'] : 0);
     }
 
     /**
@@ -725,7 +862,9 @@ class EventBridgePostEvents
     {
         $metrics = array(
             'successful_events' => $this->successful_events,
-            'failed_events' => $this->failed_events
+            'failed_events' => $this->failed_events,
+            'transient_failures' => $this->transient_failures,
+            'permanent_failures' => $this->permanent_failures
         );
         update_option(self::OPTION_METRICS, $metrics, false);
     }
@@ -744,11 +883,17 @@ class EventBridgePostEvents
      * Consolidates DB writes to reduce I/O and race conditions
      *
      * @param string $error_message The error message
+     * @param bool $is_transient Whether the failure is transient (retryable) or permanent
      */
-    private function record_failure($error_message)
+    private function record_failure($error_message, $is_transient = false)
     {
-        // Increment in-memory counter
+        // Increment in-memory counters
         $this->failed_events++;
+        if ($is_transient) {
+            $this->transient_failures++;
+        } else {
+            $this->permanent_failures++;
+        }
 
         // Read, mutate, and write failure details in one operation
         $failure_details = get_option(self::OPTION_FAILURE_DETAILS, array(
@@ -759,7 +904,8 @@ class EventBridgePostEvents
         $failure_details['last_failure_time'] = current_time('mysql');
         $failure_details['messages'][] = array(
             'time' => current_time('mysql'),
-            'message' => $error_message
+            'message' => $error_message,
+            'type' => $is_transient ? 'transient' : 'permanent'
         );
 
         // Keep only the last 10 failure messages
@@ -784,23 +930,184 @@ class EventBridgePostEvents
             $this->record_success();
         } else {
             $error_message = isset($result['error']) ? $result['error'] : 'Unknown error';
-            $this->record_failure($error_message);
+            $is_transient = isset($result['is_transient']) ? $result['is_transient'] : false;
+            $this->record_failure($error_message, $is_transient);
         }
     }
 
     /**
-     * インスタンスメタデータから識別情報を取得する
+     * IMDSv2トークンを取得する
+     *
+     * @return string|null トークン、または取得失敗時はnull
+     */
+    private function get_imds_token()
+    {
+        $token_response = wp_remote_request(self::IMDS_BASE_URL . '/latest/api/token', array(
+            'method' => 'PUT',
+            'headers' => array('X-aws-ec2-metadata-token-ttl-seconds' => '21600'),
+            'timeout' => self::IMDS_TIMEOUT,
+        ));
+
+        if (is_wp_error($token_response) || wp_remote_retrieve_response_code($token_response) !== 200) {
+            return null;
+        }
+
+        $token = wp_remote_retrieve_body($token_response);
+        return !empty($token) ? $token : null;
+    }
+
+    /**
+     * インスタンスメタデータから識別情報を取得する（IMDSv2対応、キャッシュ付き）
+     *
+     * IMDSv2はトークンベース認証を使用し、SSRF攻撃に対してより安全です。
+     * 結果はWordPress transientにキャッシュされ、毎ページロードでのHTTPリクエストを回避します。
+     * EC2以外の環境では空配列を返します。
      *
      * @return array インスタンス識別情報
      */
     private function get_instance_identity()
     {
-        $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document');
-        if (is_wp_error($response)) {
+        // キャッシュをチェック
+        $cached = get_transient(self::TRANSIENT_IMDS_IDENTITY);
+        if ($cached !== false) {
+            return $cached;
+        }
+
+        // 失敗キャッシュをチェック（EC2以外の環境で無駄なリクエストを避ける）
+        if (get_transient(self::TRANSIENT_IMDS_FAILED) !== false) {
             return array();
         }
+
+        // IMDSv2トークンを取得
+        $token = $this->get_imds_token();
+        if ($token === null) {
+            // 失敗をキャッシュ
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return array();
+        }
+
+        // トークンを使ってメタデータを取得
+        $response = wp_remote_get(self::IMDS_BASE_URL . '/latest/dynamic/instance-identity/document', array(
+            'headers' => array('X-aws-ec2-metadata-token' => $token),
+            'timeout' => self::IMDS_TIMEOUT,
+        ));
+
+        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return array();
+        }
+
         $body = wp_remote_retrieve_body($response);
-        return json_decode($body, true);
+        $data = json_decode($body, true);
+
+        if (!is_array($data) || json_last_error() !== JSON_ERROR_NONE) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return array();
+        }
+
+        // 成功をキャッシュ
+        set_transient(self::TRANSIENT_IMDS_IDENTITY, $data, self::IMDS_IDENTITY_CACHE_DURATION);
+        return $data;
+    }
+
+    /**
+     * EC2インスタンスロールから一時的な認証情報を取得する（IMDSv2対応、キャッシュ付き）
+     *
+     * 認証情報の有効期限を考慮してキャッシュします。
+     * 有効期限の5分前に新しい認証情報を取得します。
+     *
+     * @return array|null 認証情報配列（AccessKeyId, SecretAccessKey, Token, Expiration）、または取得失敗時はnull
+     */
+    private function get_instance_credentials()
+    {
+        // キャッシュをチェック
+        $cached = get_transient(self::TRANSIENT_IMDS_CREDENTIALS);
+        if ($cached !== false) {
+            // 有効期限の5分前かどうかをチェック
+            if (isset($cached['Expiration'])) {
+                $expiration = strtotime($cached['Expiration']);
+                $now = time();
+                // 有効期限の5分前より早ければキャッシュを使用
+                if ($expiration - $now > 300) {
+                    return $cached;
+                }
+                // 有効期限が近いのでキャッシュを削除して再取得
+                delete_transient(self::TRANSIENT_IMDS_CREDENTIALS);
+            } else {
+                return $cached;
+            }
+        }
+
+        // 失敗キャッシュをチェック
+        if (get_transient(self::TRANSIENT_IMDS_FAILED) !== false) {
+            return null;
+        }
+
+        // IMDSv2トークンを取得
+        $token = $this->get_imds_token();
+        if ($token === null) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        // IAMロール名を取得
+        $role_response = wp_remote_get(self::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/', array(
+            'headers' => array('X-aws-ec2-metadata-token' => $token),
+            'timeout' => self::IMDS_TIMEOUT,
+        ));
+
+        if (is_wp_error($role_response) || wp_remote_retrieve_response_code($role_response) !== 200) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        $role_name = trim(wp_remote_retrieve_body($role_response));
+        if (empty($role_name)) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        // 認証情報を取得
+        $creds_response = wp_remote_get(self::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/' . $role_name, array(
+            'headers' => array('X-aws-ec2-metadata-token' => $token),
+            'timeout' => self::IMDS_TIMEOUT,
+        ));
+
+        if (is_wp_error($creds_response) || wp_remote_retrieve_response_code($creds_response) !== 200) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        $creds = json_decode(wp_remote_retrieve_body($creds_response), true);
+
+        if (json_last_error() !== JSON_ERROR_NONE ||
+            empty($creds['AccessKeyId']) ||
+            empty($creds['SecretAccessKey']) ||
+            !isset($creds['Token'])) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        $credentials = array(
+            'AccessKeyId' => $creds['AccessKeyId'],
+            'SecretAccessKey' => $creds['SecretAccessKey'],
+            'Token' => $creds['Token'],
+            'Expiration' => isset($creds['Expiration']) ? $creds['Expiration'] : null,
+        );
+
+        // 有効期限に基づいてキャッシュ期間を計算（有効期限の5分前まで）
+        $cache_duration = self::IMDS_IDENTITY_CACHE_DURATION;
+        if (isset($creds['Expiration'])) {
+            $expiration = strtotime($creds['Expiration']);
+            $now = time();
+            $time_until_expiry = $expiration - $now - 300; // 5分のマージン
+            if ($time_until_expiry > 0) {
+                $cache_duration = min($cache_duration, $time_until_expiry);
+            }
+        }
+
+        set_transient(self::TRANSIENT_IMDS_CREDENTIALS, $credentials, $cache_duration);
+        return $credentials;
     }
 
     /**
@@ -833,17 +1140,54 @@ class EventBridgePostEvents
         $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
 
         if (empty($correlation_id)) {
-            $correlation_id = wp_generate_uuid4();
+            // Try wp_generate_uuid4() first (WordPress 4.7+)
+            if (function_exists('wp_generate_uuid4')) {
+                $correlation_id = wp_generate_uuid4();
+            } else {
+                // Fallback: generate UUID v4 manually
+                $correlation_id = $this->generate_uuid_v4();
+            }
+
             $added = add_post_meta($post_id, '_event_correlation_id', $correlation_id, true);
 
             // If add_post_meta returned false, another request wrote the meta first
             // Re-read the actual value that was stored
             if ($added === false) {
                 $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
+
+                // Final fallback if correlation_id is still empty
+                if (empty($correlation_id)) {
+                    // This can happen in a race condition where another process adds an empty meta value.
+                    // We'll generate a new UUID and attempt to save it.
+                    $correlation_id = $this->generate_uuid_v4();
+                    update_post_meta($post_id, '_event_correlation_id', $correlation_id);
+                    error_log(sprintf(
+                        '[EventBridge] Corrected empty correlation ID. Using fallback UUID for post ID %d: %s',
+                        $post_id,
+                        $correlation_id
+                    ));
+                }
             }
         }
 
         return $correlation_id;
+    }
+
+    /**
+     * Generate UUID v4 as fallback when wp_generate_uuid4() is not available
+     *
+     * @return string UUID v4
+     */
+    private function generate_uuid_v4()
+    {
+        $data = random_bytes(16);
+
+        // Set version to 0100
+        $data[6] = chr(ord($data[6]) & 0x0f | 0x40);
+        // Set bits 6-7 to 10
+        $data[8] = chr(ord($data[8]) & 0x3f | 0x80);
+
+        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
     }
 
     /**
@@ -898,37 +1242,71 @@ class EventBridgePostEvents
      */
     public function send_post_event($new_status, $old_status, $post)
     {
-        if ($new_status !== 'publish') {
+        // Validate post object
+        if (!($post instanceof WP_Post) || empty($post->ID)) {
+            error_log('[EventBridge] Invalid post object provided to send_post_event');
             return;
         }
 
         // Check if this post type is enabled for EventBridge
-        $post_type = $post->post_type;
-        if (!$this->is_post_type_enabled($post_type)) {
+        if (!$this->is_post_type_enabled($post->post_type)) {
             return;
         }
 
-        $event_name = $new_status === $old_status ? 'post.updated' : 'post.' . $new_status . 'ed'; // post.published、post.drafted など
+        // Only handle publish and future status transitions
+        if ($new_status !== 'publish' && $new_status !== 'future') {
+            return;
+        }
+
+        // Determine event type based on status transition
+        if ($new_status === 'future') {
+            // Scheduled post
+            $event_name = 'post.scheduled';
+        } elseif ($old_status === 'publish') {
+            // Update to already published post (publish -> publish)
+            $event_name = 'post.updated';
+        } else {
+            // New publish (from draft, future, etc.)
+            $event_name = 'post.published';
+        }
+
+        // Safely get post properties with null checks
         $permalink = get_permalink($post->ID);
+        $post_type = !empty($post->post_type) ? $post->post_type : 'post';
+        $post_title = !empty($post->post_title) ? $post->post_title : '';
+        $post_excerpt = !empty($post->post_excerpt) ? $post->post_excerpt : '';
 
         // Get REST API URL using rest_base from post type object
         $post_type_obj = get_post_type_object($post_type);
-        $rest_base = !empty($post_type_obj->rest_base) ? $post_type_obj->rest_base : $post_type;
+        $rest_base = (!empty($post_type_obj) && !empty($post_type_obj->rest_base)) ? $post_type_obj->rest_base : $post_type;
         $api_url = get_rest_url(null, 'wp/v2/' . $rest_base . '/' . $post->ID);
 
         $event_data = array(
             'id' => (string)$post->ID,
-            'title' => $post->post_title,
-            'excerpt' => $post->post_excerpt,
+            'title' => $post_title,
+            'excerpt' => $post_excerpt,
             'status' => $new_status,
+            'previous_status' => $old_status,
             'updated_at' => time(),
             'permalink' => $permalink,
             'api_url' => $api_url,
-            'post_type' => $post_type,
-            'previous_status' => $old_status
+            'post_type' => $post_type
         );
 
         $event_payload = $this->prepare_event_payload($event_data, $post->ID);
+
+        // Early fast-fail: check if event payload can be JSON encoded
+        // Note: The authoritative size check happens in sendEvent() after building the full envelope
+        $payload_json = json_encode($event_payload);
+        if ($payload_json === false) {
+            error_log(sprintf(
+                '[EventBridge] Failed to JSON encode event payload for post ID %d: %s',
+                $post->ID,
+                json_last_error_msg()
+            ));
+            return;
+        }
+
         $this->dispatch_event(EVENT_SOURCE_NAME, $event_name, $event_payload);
     }
 
