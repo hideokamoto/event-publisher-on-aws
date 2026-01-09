@@ -1,0 +1,38 @@
+{
+    "name": "hideokamoto/event-publisher-on-aws",
+    "description": "WordPress plugin to send events to Amazon EventBridge",
+    "type": "wordpress-plugin",
+    "license": "GPL-3.0-or-later",
+    "authors": [
+        {
+            "name": "hideokamoto"
+        }
+    ],
+    "require": {},
+    "require-dev": {
+        "phpunit/phpunit": "^9.6",
+        "yoast/phpunit-polyfills": "^2.0",
+        "brain/monkey": "^2.6"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "EventBridgePostEvents\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test:unit": "phpunit --testsuite unit",
+        "test:integration": "phpunit --testsuite integration",
+        "test": "phpunit"
+    },
+    "config": {
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        },
+        "platform": {
+            "php": "7.4"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "_comment": "IMPORTANT: This plugin has NO production dependencies. The vendor/ directory must NEVER be distributed with the plugin. All dependencies are for development/testing only."
+}

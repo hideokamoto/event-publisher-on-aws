@@ -1,0 +1,128 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  unit-tests:
+    name: Unit Tests (PHP ${{ matrix.php-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['7.4', '8.0', '8.1', '8.2']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: mbstring, intl
+          coverage: none
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Install Composer dependencies
+        run: composer install --prefer-dist --no-progress --dev
+
+      - name: Run unit tests
+        run: composer test:unit
+
+  integration-tests:
+    name: Integration Tests (PHP ${{ matrix.php-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.1']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: mbstring, intl
+          coverage: none
+
+      - name: Install Composer dependencies
+        run: composer install --prefer-dist --no-progress --dev
+
+      - name: Start wp-env
+        run: npm run wp-env start
+
+      - name: Run integration tests
+        run: npm run test:integration
+
+      - name: Stop wp-env
+        if: always()
+        run: npm run wp-env stop
+
+  verify-no-vendor:
+    name: Verify No Vendor Distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for vendor directory
+        run: |
+          if [ -d "vendor" ]; then
+            echo "ERROR: vendor/ directory should not be committed to the repository"
+            echo "This plugin has NO production dependencies."
+            echo "All dependencies are for development/testing only."
+            exit 1
+          fi
+          echo "OK: vendor/ directory is not present"
+
+      - name: Check gitignore includes vendor
+        run: |
+          if ! grep -q "^vendor" .gitignore 2>/dev/null && ! grep -q "^/vendor" .gitignore 2>/dev/null; then
+            echo "WARNING: vendor/ should be in .gitignore"
+          fi
+          echo "OK: .gitignore configuration verified"
+
+  lint:
+    name: PHP Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+
+      - name: Check PHP syntax
+        run: |
+          find . -name "*.php" -not -path "./vendor/*" -print0 | xargs -0 -n1 php -l

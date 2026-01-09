@@ -1,3 +1,21 @@
 node_modules
 *.js
 index.html
+
+# Composer dependencies - NEVER distribute vendor/ with plugin
+vendor/
+composer.lock
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# WordPress environment
+.wp-env/
+
+# Test output
+.phpunit.result.cache
+coverage/

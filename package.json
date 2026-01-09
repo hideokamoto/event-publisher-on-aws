@@ -1,12 +1,21 @@
 {
   "name": "event-publisher-on-aws",
-  "version": "1.0.0",
-  "description": "",
+  "version": "1.1.0",
+  "description": "WordPress plugin to send events to Amazon EventBridge",
   "main": "index.js",
   "scripts": {
-    "dev": "wp-now start"
+    "dev": "wp-now start",
+    "wp-env": "wp-env",
+    "test:unit": "wp-env run tests-cli --env-cwd=wp-content/plugins/event-publisher-on-aws vendor/bin/phpunit --testsuite unit",
+    "test:integration": "wp-env run tests-cli --env-cwd=wp-content/plugins/event-publisher-on-aws vendor/bin/phpunit --testsuite integration",
+    "test": "npm run test:unit && npm run test:integration"
   },
-  "keywords": [],
+  "keywords": [
+    "wordpress",
+    "plugin",
+    "eventbridge",
+    "aws"
+  ],
   "author": "hideokamoto",
   "license": "GPL-3.0-or-later",
   "devDependencies": {
