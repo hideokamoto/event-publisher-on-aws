@@ -14,6 +14,10 @@ define('EVENT_SOURCE_NAME', 'wordpress'); // デフォルトのイベントバ�
 
 class EventBridgePutEvents
 {
+    // AWS region format validation pattern
+    // Supports standard regions (us-east-1) and GovCloud regions (us-gov-west-1)
+    const REGION_FORMAT_REGEX = '/^[a-z]{2,3}(-[a-z]+)+-\d+$/';
+
     private $accessKeyId;
     private $secretAccessKey;
     private $region;
@@ -27,8 +31,8 @@ class EventBridgePutEvents
             throw new Exception('EventBridgePutEvents: Access key ID and secret access key cannot be empty');
         }
 
-        // Validate region format
-        if (empty($region) || !preg_match('/^[a-z]{2,3}-[a-z]+-\d+$/', $region)) {
+        // Validate region format (supports standard and GovCloud regions)
+        if (empty($region) || !preg_match(self::REGION_FORMAT_REGEX, $region)) {
             throw new Exception(sprintf('EventBridgePutEvents: Invalid AWS region format: %s', $region));
         }
 
@@ -358,9 +362,9 @@ class EventBridgePostEvents
      */
     private function get_aws_credentials()
     {
-        // Check environment variables first
-        $env_access_key = getenv('AWS_ACCESS_KEY_ID');
-        $env_secret_key = getenv('AWS_SECRET_ACCESS_KEY');
+        // Check environment variables (getenv, $_ENV, $_SERVER)
+        $env_access_key = $this->get_env_var('AWS_ACCESS_KEY_ID');
+        $env_secret_key = $this->get_env_var('AWS_SECRET_ACCESS_KEY');
 
         if (!empty($env_access_key) && !empty($env_secret_key)) {
             return array(
@@ -385,6 +389,34 @@ class EventBridgePostEvents
         }
 
         return null;
+    }
+
+    /**
+     * Get environment variable from getenv(), $_ENV, or $_SERVER
+     * Handles cases where getenv() is disabled
+     *
+     * @param string $name Environment variable name
+     * @return string|false Environment variable value or false if not found
+     */
+    private function get_env_var($name)
+    {
+        // Try getenv() first
+        $value = getenv($name);
+        if ($value !== false && $value !== '') {
+            return $value;
+        }
+
+        // Fallback to $_ENV
+        if (isset($_ENV[$name]) && $_ENV[$name] !== '') {
+            return $_ENV[$name];
+        }
+
+        // Fallback to $_SERVER
+        if (isset($_SERVER[$name]) && $_SERVER[$name] !== '') {
+            return $_SERVER[$name];
+        }
+
+        return false;
     }
 
     /**
@@ -446,8 +478,7 @@ class EventBridgePostEvents
     {
         // AWS region format: 2-3 letter prefix, dash, geographic area, dash, number
         // Examples: us-east-1, eu-west-2, ap-southeast-1, us-gov-west-1
-        $pattern = '/^[a-z]{2,3}-[a-z]+-\d+$/';
-        return preg_match($pattern, $region) === 1;
+        return preg_match(EventBridgePutEvents::REGION_FORMAT_REGEX, $region) === 1;
     }
 
     public function __construct()
@@ -919,9 +950,9 @@ class EventBridgePostEvents
         $body = wp_remote_retrieve_body($response);
         $identity = json_decode($body, true);
 
-        // Validate that region is not null/empty
-        if (!isset($identity['region']) || empty($identity['region'])) {
-            error_log('[EventBridge] Instance identity region is null or empty');
+        // Validate that identity is a valid array and region is not null/empty
+        if (!is_array($identity) || !isset($identity['region']) || empty($identity['region'])) {
+            error_log('[EventBridge] Instance identity document is invalid or region is missing');
             return array();
         }
 
