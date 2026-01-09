@@ -149,10 +149,13 @@ class RegionDetectionTest extends TestCase
      */
     public function test_fallback_when_metadata_unavailable()
     {
-        // Mock metadata service being unavailable (returns empty array)
-        Functions\when('wp_remote_get')->justReturn(
-            new \WP_Error('http_request_failed', 'Connection refused')
-        );
+        // Mock metadata service being unavailable (returns error object)
+        $mockError = (object)[
+            'code' => 'http_request_failed',
+            'message' => 'Connection refused'
+        ];
+
+        Functions\when('wp_remote_get')->justReturn($mockError);
         Functions\when('is_wp_error')->justReturn(true);
 
         $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document');

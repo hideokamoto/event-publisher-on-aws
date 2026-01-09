@@ -20,20 +20,20 @@ class PostStatusTransitionTest extends WP_UnitTestCase
         // Load AWS response fixtures
         $this->fixtures = include dirname(__DIR__) . '/fixtures/aws-responses.php';
 
-        // Mock EC2 metadata to prevent real network calls
-        add_filter('pre_http_request', [$this, 'mock_ec2_metadata'], 10, 3);
+        // Mock HTTP requests to prevent real network calls
+        add_filter('pre_http_request', [$this, 'mock_http_requests'], 10, 3);
     }
 
     public function tearDown(): void
     {
-        remove_filter('pre_http_request', [$this, 'mock_ec2_metadata']);
+        remove_filter('pre_http_request', [$this, 'mock_http_requests']);
         parent::tearDown();
     }
 
     /**
-     * Mock EC2 metadata service and EventBridge API requests
+     * Mock HTTP requests for EC2 metadata service and EventBridge API
      */
-    public function mock_ec2_metadata($preempt, $args, $url)
+    public function mock_http_requests($preempt, $args, $url)
     {
         // Mock EC2 metadata service
         if (strpos($url, '169.254.169.254') !== false) {

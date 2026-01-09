@@ -40,7 +40,7 @@ if ($is_wp_env) {
     if (file_exists(dirname(dirname(__FILE__)) . '/vendor/autoload.php')) {
         require_once dirname(dirname(__FILE__)) . '/vendor/autoload.php';
     } else {
-        die("Composer dependencies not installed. Run 'composer install --dev' first.\n");
+        die("Composer dependencies not installed. Run 'composer install' first.\n");
     }
 
     // Brain Monkey will be initialized in unit test bootstrap

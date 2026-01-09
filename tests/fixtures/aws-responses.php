@@ -148,17 +148,23 @@ return [
     /**
      * Network error - connection timeout
      */
-    'network_timeout' => new WP_Error('http_request_failed', 'Connection timeout after 5000ms'),
+    'network_timeout' => class_exists('WP_Error')
+        ? new WP_Error('http_request_failed', 'Connection timeout after 5000ms')
+        : (object)['code' => 'http_request_failed', 'message' => 'Connection timeout after 5000ms'],
 
     /**
      * Network error - DNS resolution failure
      */
-    'dns_failure' => new WP_Error('http_request_failed', 'Could not resolve host: events.us-east-1.amazonaws.com'),
+    'dns_failure' => class_exists('WP_Error')
+        ? new WP_Error('http_request_failed', 'Could not resolve host: events.us-east-1.amazonaws.com')
+        : (object)['code' => 'http_request_failed', 'message' => 'Could not resolve host: events.us-east-1.amazonaws.com'],
 
     /**
      * Network error - connection refused
      */
-    'connection_refused' => new WP_Error('http_request_failed', 'Connection refused'),
+    'connection_refused' => class_exists('WP_Error')
+        ? new WP_Error('http_request_failed', 'Connection refused')
+        : (object)['code' => 'http_request_failed', 'message' => 'Connection refused'],
 
     /**
      * EC2 metadata service response
@@ -177,5 +183,7 @@ return [
     /**
      * EC2 metadata service - timeout (not running on EC2)
      */
-    'ec2_metadata_timeout' => new WP_Error('http_request_failed', 'Connection timeout'),
+    'ec2_metadata_timeout' => class_exists('WP_Error')
+        ? new WP_Error('http_request_failed', 'Connection timeout')
+        : (object)['code' => 'http_request_failed', 'message' => 'Connection timeout'],
 ];

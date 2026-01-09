@@ -56,9 +56,17 @@ jobs:
 
       - name: Configure wp-env for PHP version
         run: |
+          # Translate 'latest' to null (default latest stable) for wp-env
+          WP_VERSION="${{ matrix.wp-version }}"
+          if [ "$WP_VERSION" = "latest" ]; then
+            WP_CORE_VALUE="null"
+          else
+            WP_CORE_VALUE="\"WordPress/WordPress#$WP_VERSION\""
+          fi
+
           cat > .wp-env.override.json << EOF
           {
-            "core": "WordPress/WordPress#${{ matrix.wp-version }}",
+            "core": $WP_CORE_VALUE,
             "phpVersion": "${{ matrix.php-version }}",
             "plugins": ["."]
           }
