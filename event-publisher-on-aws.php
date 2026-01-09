@@ -33,16 +33,40 @@ class EventBridgePutEvents
     {
         $method = 'POST';
         $path = '/';
-        $payload = json_encode(array(
+
+        // Encode Detail field using wp_json_encode and check for failures
+        $detail_json = wp_json_encode($detail);
+        if ($detail_json === false) {
+            $error_msg = 'Failed to JSON encode Detail field (possibly invalid UTF-8 or deeply nested data)';
+            error_log(sprintf(
+                '[EventBridge] JSON encoding failed: %s, DetailType=%s',
+                $error_msg,
+                $detailType
+            ));
+            return array('success' => false, 'error' => $error_msg, 'response' => null);
+        }
+
+        // Encode outer payload using wp_json_encode and check for failures
+        $payload = wp_json_encode(array(
             'Entries' => array(
                 array(
                     'EventBusName' => EVENT_BUS_NAME,
                     'Source' => $source,
                     'DetailType' => $detailType,
-                    'Detail' => json_encode($detail),
+                    'Detail' => $detail_json,
                 ),
             ),
         ));
+
+        if ($payload === false) {
+            $error_msg = 'Failed to JSON encode outer payload';
+            error_log(sprintf(
+                '[EventBridge] JSON encoding failed: %s, DetailType=%s',
+                $error_msg,
+                $detailType
+            ));
+            return array('success' => false, 'error' => $error_msg, 'response' => null);
+        }
 
         $now = new DateTime();
         $amzDate = $now->format('Ymd\THis\Z');
