@@ -21,6 +21,121 @@ if (!defined('EVENT_SOURCE_NAME')) {
     define('EVENT_SOURCE_NAME', 'wordpress');
 }
 
+/**
+ * Helper function to get IMDSv2 token
+ * Used by both activation hook and main class
+ *
+ * @return string|null Token or null on failure
+ */
+function eventbridge_get_imds_token()
+{
+    $token_response = wp_remote_request('http://169.254.169.254/latest/api/token', array(
+        'method' => 'PUT',
+        'headers' => array('X-aws-ec2-metadata-token-ttl-seconds' => '21600'),
+        'timeout' => 2,
+    ));
+
+    if (is_wp_error($token_response) || wp_remote_retrieve_response_code($token_response) !== 200) {
+        return null;
+    }
+
+    $token = wp_remote_retrieve_body($token_response);
+    return !empty($token) ? $token : null;
+}
+
+/**
+ * Helper function to get instance identity using IMDSv2
+ * Used by both activation hook and main class
+ *
+ * @param bool $use_cache Whether to use transient caching
+ * @return array Instance identity data or empty array on failure
+ */
+function eventbridge_get_instance_identity_imdsv2($use_cache = true)
+{
+    $cache_key = 'eventbridge_imds_identity';
+    $failed_cache_key = 'eventbridge_imds_failed';
+
+    // Check cache if enabled
+    if ($use_cache) {
+        $cached = get_transient($cache_key);
+        if ($cached !== false) {
+            return $cached;
+        }
+
+        // Check failed cache to avoid repeated requests on non-EC2 environments
+        if (get_transient($failed_cache_key) !== false) {
+            return array();
+        }
+    }
+
+    // Get IMDSv2 token
+    $token = eventbridge_get_imds_token();
+    if ($token === null) {
+        if ($use_cache) {
+            set_transient($failed_cache_key, true, 300); // Cache failure for 5 minutes
+        }
+        return array();
+    }
+
+    // Fetch instance identity document with token
+    $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document', array(
+        'headers' => array('X-aws-ec2-metadata-token' => $token),
+        'timeout' => 2,
+    ));
+
+    if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+        if ($use_cache) {
+            set_transient($failed_cache_key, true, 300);
+        }
+        return array();
+    }
+
+    $body = wp_remote_retrieve_body($response);
+    $data = json_decode($body, true);
+
+    if (!is_array($data) || json_last_error() !== JSON_ERROR_NONE) {
+        if ($use_cache) {
+            set_transient($failed_cache_key, true, 300);
+        }
+        return array();
+    }
+
+    // Cache successful result
+    if ($use_cache) {
+        set_transient($cache_key, $data, 3600); // Cache for 1 hour
+    }
+
+    return $data;
+}
+
+/**
+ * Helper function to check if instance role credentials are available using IMDSv2
+ * Used by activation hook to validate credential availability
+ *
+ * @return bool True if instance role credentials are available
+ */
+function eventbridge_check_instance_role_credentials()
+{
+    // Get IMDSv2 token
+    $token = eventbridge_get_imds_token();
+    if ($token === null) {
+        return false;
+    }
+
+    // Try to get IAM role name
+    $role_response = wp_remote_get('http://169.254.169.254/latest/meta-data/iam/security-credentials/', array(
+        'headers' => array('X-aws-ec2-metadata-token' => $token),
+        'timeout' => 2,
+    ));
+
+    if (is_wp_error($role_response) || wp_remote_retrieve_response_code($role_response) !== 200) {
+        return false;
+    }
+
+    $role_name = trim(wp_remote_retrieve_body($role_response));
+    return !empty($role_name);
+}
+
 class EventBridgePutEvents
 {
     private $accessKeyId;
@@ -928,27 +1043,6 @@ class EventBridgePostEvents
     }
 
     /**
-     * IMDSv2トークンを取得する
-     *
-     * @return string|null トークン、または取得失敗時はnull
-     */
-    private function get_imds_token()
-    {
-        $token_response = wp_remote_request(self::IMDS_BASE_URL . '/latest/api/token', array(
-            'method' => 'PUT',
-            'headers' => array('X-aws-ec2-metadata-token-ttl-seconds' => '21600'),
-            'timeout' => self::IMDS_TIMEOUT,
-        ));
-
-        if (is_wp_error($token_response) || wp_remote_retrieve_response_code($token_response) !== 200) {
-            return null;
-        }
-
-        $token = wp_remote_retrieve_body($token_response);
-        return !empty($token) ? $token : null;
-    }
-
-    /**
      * インスタンスメタデータから識別情報を取得する（IMDSv2対応、キャッシュ付き）
      *
      * IMDSv2はトークンベース認証を使用し、SSRF攻撃に対してより安全です。
@@ -959,47 +1053,7 @@ class EventBridgePostEvents
      */
     private function get_instance_identity()
     {
-        // キャッシュをチェック
-        $cached = get_transient(self::TRANSIENT_IMDS_IDENTITY);
-        if ($cached !== false) {
-            return $cached;
-        }
-
-        // 失敗キャッシュをチェック（EC2以外の環境で無駄なリクエストを避ける）
-        if (get_transient(self::TRANSIENT_IMDS_FAILED) !== false) {
-            return array();
-        }
-
-        // IMDSv2トークンを取得
-        $token = $this->get_imds_token();
-        if ($token === null) {
-            // 失敗をキャッシュ
-            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
-            return array();
-        }
-
-        // トークンを使ってメタデータを取得
-        $response = wp_remote_get(self::IMDS_BASE_URL . '/latest/dynamic/instance-identity/document', array(
-            'headers' => array('X-aws-ec2-metadata-token' => $token),
-            'timeout' => self::IMDS_TIMEOUT,
-        ));
-
-        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
-            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
-            return array();
-        }
-
-        $body = wp_remote_retrieve_body($response);
-        $data = json_decode($body, true);
-
-        if (!is_array($data) || json_last_error() !== JSON_ERROR_NONE) {
-            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
-            return array();
-        }
-
-        // 成功をキャッシュ
-        set_transient(self::TRANSIENT_IMDS_IDENTITY, $data, self::IMDS_IDENTITY_CACHE_DURATION);
-        return $data;
+        return eventbridge_get_instance_identity_imdsv2(true);
     }
 
     /**
@@ -1036,7 +1090,7 @@ class EventBridgePostEvents
         }
 
         // IMDSv2トークンを取得
-        $token = $this->get_imds_token();
+        $token = eventbridge_get_imds_token();
         if ($token === null) {
             set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return null;
@@ -1579,40 +1633,36 @@ function eventbridge_post_events_activate()
     );
     add_option('eventbridge_settings', $default_settings, '', true);
 
-    // Validate AWS credentials
+    // Validate AWS credentials - check both sources
     $activation_errors = array();
     $activation_warnings = array();
 
-    if (!defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') || empty(constant('AWS_EVENTBRIDGE_ACCESS_KEY_ID'))) {
-        $activation_errors[] = 'AWS_EVENTBRIDGE_ACCESS_KEY_ID is not defined or empty in wp-config.php';
+    // Check for constant-based credentials
+    $has_constant_credentials = (defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') && !empty(constant('AWS_EVENTBRIDGE_ACCESS_KEY_ID')) &&
+                                 defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY') && !empty(constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY')));
+
+    // Check for instance role credentials (using IMDSv2)
+    $has_instance_role = eventbridge_check_instance_role_credentials();
+
+    // Fail activation only if NEITHER credential source is available
+    if (!$has_constant_credentials && !$has_instance_role) {
+        $activation_errors[] = 'No AWS credentials available. Please either:';
+        $activation_errors[] = '1. Define AWS_EVENTBRIDGE_ACCESS_KEY_ID and AWS_EVENTBRIDGE_SECRET_ACCESS_KEY in wp-config.php, OR';
+        $activation_errors[] = '2. Ensure the plugin is running on an EC2 instance with an IAM role that has EventBridge PutEvents permissions';
     }
 
-    if (!defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY') || empty(constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY'))) {
-        $activation_errors[] = 'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY is not defined or empty in wp-config.php';
-    }
+    // Validate region detection (using IMDSv2)
+    $identity = eventbridge_get_instance_identity_imdsv2(false); // Don't use cache during activation
 
-    // Validate region detection
-    if (empty($activation_errors)) {
-        $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document', array(
-            'timeout' => 5
-        ));
-
-        if (is_wp_error($response)) {
-            $activation_warnings[] = sprintf(
-                'Unable to detect AWS region from instance metadata: %s. Please ensure the plugin is running on an EC2 instance or configure region manually.',
-                $response->get_error_message()
-            );
-        } else {
-            $body = wp_remote_retrieve_body($response);
-            $identity = json_decode($body, true);
-
-            if (empty($identity['region'])) {
-                $activation_warnings[] = 'AWS region could not be detected from instance metadata. Please ensure the plugin is running on an EC2 instance with proper IAM role.';
-            } else {
-                // Region detected successfully - log for confirmation
-                error_log(sprintf('[EventBridge] Plugin activated. Region detected: %s', $identity['region']));
-            }
-        }
+    if (!empty($identity['region'])) {
+        // Region detected successfully - log for confirmation
+        error_log(sprintf('[EventBridge] Plugin activated. Region detected: %s', $identity['region']));
+    } elseif (!defined('AWS_EVENTBRIDGE_REGION') || empty(constant('AWS_EVENTBRIDGE_REGION'))) {
+        // No region from IMDS and no fallback constant
+        $activation_warnings[] = 'AWS region could not be detected from EC2 instance metadata and AWS_EVENTBRIDGE_REGION is not defined. Please ensure the plugin is running on an EC2 instance or define AWS_EVENTBRIDGE_REGION in wp-config.php.';
+    } else {
+        // Using fallback region from constant
+        error_log(sprintf('[EventBridge] Plugin activated. Using fallback region from constant: %s', constant('AWS_EVENTBRIDGE_REGION')));
     }
 
     // Store activation errors/warnings for display
@@ -1624,9 +1674,22 @@ function eventbridge_post_events_activate()
             '<h1>EventBridge Post Events - Activation Failed</h1>' .
             '<p><strong>The following errors prevented plugin activation:</strong></p>' .
             '<ul><li>' . implode('</li><li>', array_map('esc_html', $activation_errors)) . '</li></ul>' .
-            '<p>Please configure the required AWS credentials in wp-config.php:</p>' .
+            '<h3>Configuration Options:</h3>' .
+            '<p><strong>Option 1: Static Credentials</strong><br>' .
+            'Add to wp-config.php:</p>' .
             '<pre>define(\'AWS_EVENTBRIDGE_ACCESS_KEY_ID\', \'your-access-key-id\');<br>' .
-            'define(\'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY\', \'your-secret-access-key\');</pre>' .
+            'define(\'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY\', \'your-secret-access-key\');<br>' .
+            'define(\'AWS_EVENTBRIDGE_REGION\', \'us-east-1\'); // Optional if not on EC2</pre>' .
+            '<p><strong>Option 2: EC2 Instance Role (Recommended)</strong><br>' .
+            'Attach an IAM role to your EC2 instance with the following policy:</p>' .
+            '<pre>{\n' .
+            '  "Version": "2012-10-17",\n' .
+            '  "Statement": [{\n' .
+            '    "Effect": "Allow",\n' .
+            '    "Action": "events:PutEvents",\n' .
+            '    "Resource": "*"\n' .
+            '  }]\n' .
+            '}</pre>' .
             '<p><a href="' . esc_url(admin_url('plugins.php')) . '">Return to Plugins</a></p>'
         );
     }
