@@ -13,13 +13,8 @@ if (!defined('EVENTBRIDGE_POST_EVENTS_FILE')) {
     define('EVENTBRIDGE_POST_EVENTS_FILE', __FILE__);
 }
 
-// EventBridge設定（wp-config.phpで上書き可能）
-if (!defined('EVENT_BUS_NAME')) {
-    define('EVENT_BUS_NAME', 'wp-kyoto');
-}
-if (!defined('EVENT_SOURCE_NAME')) {
-    define('EVENT_SOURCE_NAME', 'wordpress');
-}
+// Note: EVENT_BUS_NAME, EVENT_SOURCE_NAME, and AWS_REGION_OVERRIDE can be defined in wp-config.php
+// to override admin settings. When not defined, admin settings will be used.
 
 /**
  * Helper function to get IMDSv2 token
@@ -144,8 +139,9 @@ class EventBridgePutEvents
     private $region;
     private $endpoint;
     private $serviceName;
+    private $eventBusName;
 
-    public function __construct($accessKeyId, $secretAccessKey, $region, $sessionToken = null)
+    public function __construct($accessKeyId, $secretAccessKey, $region, $sessionToken = null, $eventBusName = 'default')
     {
         $this->accessKeyId = $accessKeyId;
         $this->secretAccessKey = $secretAccessKey;
@@ -153,6 +149,7 @@ class EventBridgePutEvents
         $this->region = $region;
         $this->endpoint = 'events.' . $region . '.amazonaws.com';
         $this->serviceName = 'events';
+        $this->eventBusName = $eventBusName;
     }
 
     public function sendEvent($source, $detailType, $detail)
@@ -170,7 +167,7 @@ class EventBridgePutEvents
         $envelope = array(
             'Entries' => array(
                 array(
-                    'EventBusName' => EVENT_BUS_NAME,
+                    'EventBusName' => $this->eventBusName,
                     'Source' => $source,
                     'DetailType' => $detailType,
                     'Detail' => $detail_json,
@@ -271,7 +268,7 @@ class EventBridgePutEvents
                     $detailType,
                     $postId,
                     $this->region,
-                    EVENT_BUS_NAME,
+                    $this->eventBusName,
                     $timestamp
                 ));
             }
@@ -459,7 +456,7 @@ class EventBridgePutEvents
             $lastResponseCode,
             $isLastErrorTransient ? 'yes' : 'no',
             $this->region,
-            EVENT_BUS_NAME,
+            $this->eventBusName,
             $timestamp
         ));
 
@@ -516,6 +513,10 @@ class EventBridgePostEvents
     private $region;
     private $credentials;
     private $client;
+    private $access_key;
+    private $secret_key;
+    private $session_token;
+    private $credential_source;
 
     // In-memory counters for tracking metrics
     private $successful_events = 0;
@@ -570,6 +571,7 @@ class EventBridgePostEvents
             // 定数から静的認証情報を取得
             $access_key = AWS_EVENTBRIDGE_ACCESS_KEY_ID;
             $secret_key = AWS_EVENTBRIDGE_SECRET_ACCESS_KEY;
+            $this->credential_source = 'Constants (wp-config.php)';
         } else {
             // 定数が未定義の場合、EC2インスタンスロールから取得
             $instance_creds = $this->get_instance_credentials();
@@ -577,6 +579,7 @@ class EventBridgePostEvents
                 $access_key = $instance_creds['AccessKeyId'];
                 $secret_key = $instance_creds['SecretAccessKey'];
                 $session_token = $instance_creds['Token'];
+                $this->credential_source = 'IAM Role (IMDS)';
             }
         }
 
@@ -609,7 +612,12 @@ class EventBridgePostEvents
             return;
         }
 
-        $this->client = new EventBridgePutEvents($access_key, $secret_key, $this->region, $session_token);
+        // Store credentials for lazy client initialization
+        $this->access_key = $access_key;
+        $this->secret_key = $secret_key;
+        $this->session_token = $session_token;
+        // Note: Client will be initialized after settings are loaded to get event_bus_name
+        $this->client = null;
 
         // Load metrics from WordPress options
         $this->load_metrics();
@@ -634,6 +642,41 @@ class EventBridgePostEvents
     }
 
     /**
+     * Get the effective AWS region considering aws_region_override setting
+     *
+     * @return string The effective region to use
+     */
+    private function get_effective_region()
+    {
+        $region_override = $this->get_setting('aws_region_override');
+        if (!empty($region_override)) {
+            return $region_override;
+        }
+        return $this->region;
+    }
+
+    /**
+     * Get EventBridge client (lazy initialization)
+     *
+     * @return EventBridgePutEvents
+     */
+    private function get_client()
+    {
+        if ($this->client === null) {
+            $event_bus_name = $this->get_setting('event_bus_name');
+            $effective_region = $this->get_effective_region();
+            $this->client = new EventBridgePutEvents(
+                $this->access_key,
+                $this->secret_key,
+                $effective_region,
+                $this->session_token,
+                $event_bus_name
+            );
+        }
+        return $this->client;
+    }
+
+    /**
      * Get default settings
      *
      * @return array Default settings
@@ -643,6 +686,9 @@ class EventBridgePostEvents
         return array(
             'event_format' => 'envelope', // 'legacy' or 'envelope'
             'send_mode' => 'async',       // 'sync' or 'async'
+            'event_bus_name' => 'default',
+            'event_source_name' => 'wordpress',
+            'aws_region_override' => '',
             'enabled_post_types' => array('post'), // Post types to send events for
         );
     }
@@ -664,14 +710,68 @@ class EventBridgePostEvents
     }
 
     /**
-     * Get a specific setting value
+     * Get a specific setting value with priority resolution
+     * Priority order: non-empty constants first → WordPress options → default values
      *
      * @param string $key Setting key
      * @return mixed Setting value
      */
     public function get_setting($key)
     {
-        return isset($this->settings[$key]) ? $this->settings[$key] : null;
+        // Map of setting keys to their corresponding constant names
+        $constant_map = array(
+            'event_bus_name' => 'EVENT_BUS_NAME',
+            'event_source_name' => 'EVENT_SOURCE_NAME',
+            'aws_region_override' => 'AWS_REGION_OVERRIDE',
+        );
+
+        // Check for constant overrides first (highest priority)
+        // Only use constant if it's defined AND non-empty
+        if (isset($constant_map[$key]) && defined($constant_map[$key])) {
+            $constant_value = constant($constant_map[$key]);
+            if (is_string($constant_value) && trim($constant_value) !== '') {
+                return $constant_value;
+            }
+        }
+
+        // Then check WordPress options (medium priority)
+        if (isset($this->settings[$key])) {
+            return $this->settings[$key];
+        }
+
+        // Finally fall back to defaults (lowest priority)
+        $defaults = $this->get_default_settings();
+        return isset($defaults[$key]) ? $defaults[$key] : null;
+    }
+
+    /**
+     * Sanitize and validate a setting with regex pattern
+     * Reduces duplication for event_bus_name, event_source_name, and aws_region_override
+     *
+     * @param array $input Raw input array
+     * @param string $key Setting key
+     * @param string $regex Validation regex pattern
+     * @param string $error_code Error code for add_settings_error
+     * @param string $error_message Error message
+     * @param mixed $default Default value to use on failure
+     * @return mixed Sanitized and validated value
+     */
+    private function sanitize_and_validate_setting($input, $key, $regex, $error_code, $error_message, $default)
+    {
+        if (isset($input[$key]) && !empty($input[$key])) {
+            $value = sanitize_text_field($input[$key]);
+            if (preg_match($regex, $value)) {
+                return $value;
+            } else {
+                add_settings_error(
+                    self::OPTION_SETTINGS,
+                    $error_code,
+                    $error_message
+                );
+                return $default;
+            }
+        }
+        return $default;
     }
 
     /**
@@ -719,9 +819,42 @@ class EventBridgePostEvents
             array($this, 'sanitize_settings')
         );
 
+        // AWS Configuration Section
+        add_settings_section(
+            'eventbridge_aws_section',
+            __('AWS Configuration', 'eventbridge-post-events'),
+            array($this, 'render_aws_section_description'),
+            'eventbridge-settings'
+        );
+
+        add_settings_field(
+            'event_bus_name',
+            __('Event Bus Name', 'eventbridge-post-events'),
+            array($this, 'render_event_bus_name_field'),
+            'eventbridge-settings',
+            'eventbridge_aws_section'
+        );
+
+        add_settings_field(
+            'event_source_name',
+            __('Event Source Name', 'eventbridge-post-events'),
+            array($this, 'render_event_source_name_field'),
+            'eventbridge-settings',
+            'eventbridge_aws_section'
+        );
+
+        add_settings_field(
+            'aws_region_override',
+            __('AWS Region Override', 'eventbridge-post-events'),
+            array($this, 'render_aws_region_field'),
+            'eventbridge-settings',
+            'eventbridge_aws_section'
+        );
+
+        // Event Configuration Section
         add_settings_section(
             'eventbridge_main_section',
-            __('イベント送信設定', 'eventbridge-post-events'),
+            __('Event Configuration', 'eventbridge-post-events'),
             array($this, 'render_section_description'),
             'eventbridge-settings'
         );
@@ -749,6 +882,12 @@ class EventBridgePostEvents
             'eventbridge-settings',
             'eventbridge_main_section'
         );
+
+        // Handle test connection
+        add_action('admin_post_eventbridge_test_connection', array($this, 'handle_test_connection'));
+
+        // Handle metrics reset
+        add_action('admin_post_eventbridge_reset_metrics', array($this, 'handle_reset_metrics'));
     }
 
     /**
@@ -771,6 +910,54 @@ class EventBridgePostEvents
         $sanitized['send_mode'] = isset($input['send_mode']) && in_array($input['send_mode'], self::VALID_SEND_MODES, true)
             ? $input['send_mode']
             : $defaults['send_mode'];
+
+        // Sanitize event_bus_name (preserve existing value if constant override is active and field is disabled)
+        // Accepts either a simple name or an ARN: arn:aws:events:REGION:ACCOUNT:event-bus/NAME
+        if (defined('EVENT_BUS_NAME') && !isset($input['event_bus_name'])) {
+            // Field was disabled due to constant override - preserve existing stored value
+            $sanitized['event_bus_name'] = isset($this->settings['event_bus_name']) ? $this->settings['event_bus_name'] : $defaults['event_bus_name'];
+        } else {
+            $sanitized['event_bus_name'] = $this->sanitize_and_validate_setting(
+                $input,
+                'event_bus_name',
+                '/^([a-zA-Z0-9._\-]{1,256}|arn:aws:events:[a-z]{2}-[a-z]+-\d{1}:\d{12}:event-bus\/[a-zA-Z0-9._\-\/]{1,256})$/',
+                'invalid_event_bus_name',
+                __('Event Bus Name must be a valid name (alphanumeric, hyphens, underscores, dots; max 256 chars) or a valid ARN (e.g., arn:aws:events:us-east-1:123456789012:event-bus/my-bus).', 'eventbridge-post-events'),
+                $defaults['event_bus_name']
+            );
+        }
+
+        // Sanitize event_source_name (preserve existing value if constant override is active and field is disabled)
+        // EventBridge Source accepts alphanumeric, dots, hyphens, underscores, and forward slashes
+        if (defined('EVENT_SOURCE_NAME') && !isset($input['event_source_name'])) {
+            // Field was disabled due to constant override - preserve existing stored value
+            $sanitized['event_source_name'] = isset($this->settings['event_source_name']) ? $this->settings['event_source_name'] : $defaults['event_source_name'];
+        } else {
+            $sanitized['event_source_name'] = $this->sanitize_and_validate_setting(
+                $input,
+                'event_source_name',
+                '/^[a-zA-Z0-9._\-\/]{1,256}$/',
+                'invalid_event_source_name',
+                __('Event Source Name must contain only alphanumeric characters, hyphens, underscores, dots, and forward slashes (max 256 characters).', 'eventbridge-post-events'),
+                $defaults['event_source_name']
+            );
+        }
+
+        // Sanitize aws_region_override (preserve existing value if constant override is active and field is disabled)
+        // Allow empty value to clear the override
+        if (defined('AWS_REGION_OVERRIDE') && !isset($input['aws_region_override'])) {
+            // Field was disabled due to constant override - preserve existing stored value
+            $sanitized['aws_region_override'] = isset($this->settings['aws_region_override']) ? $this->settings['aws_region_override'] : $defaults['aws_region_override'];
+        } else {
+            $sanitized['aws_region_override'] = $this->sanitize_and_validate_setting(
+                $input,
+                'aws_region_override',
+                '/^[a-z]{2}-[a-z]+-\d{1}$/',
+                'invalid_aws_region',
+                __('AWS Region Override must be in valid format (e.g., us-east-1, ap-northeast-1).', 'eventbridge-post-events'),
+                $defaults['aws_region_override']
+            );
+        }
 
         // Sanitize enabled_post_types
         $sanitized['enabled_post_types'] = array();
@@ -817,6 +1004,108 @@ class EventBridgePostEvents
         }
 
         return $available;
+    }
+
+    /**
+     * Render AWS configuration section description
+     */
+    public function render_aws_section_description()
+    {
+        ?>
+        <p><?php esc_html_e('Configure AWS EventBridge connection settings.', 'eventbridge-post-events'); ?></p>
+        <p class="description">
+            <strong><?php esc_html_e('Note:', 'eventbridge-post-events'); ?></strong>
+            <?php esc_html_e('These settings can be overridden by defining constants in wp-config.php (EVENT_BUS_NAME, EVENT_SOURCE_NAME, AWS_REGION_OVERRIDE). Constants take precedence over admin settings.', 'eventbridge-post-events'); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Render event bus name field
+     */
+    public function render_event_bus_name_field()
+    {
+        $value = $this->settings['event_bus_name'];
+        $current_value = $this->get_setting('event_bus_name');
+        $is_constant_override = defined('EVENT_BUS_NAME');
+        ?>
+        <input type="text"
+               name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[event_bus_name]"
+               value="<?php echo esc_attr($value); ?>"
+               class="regular-text"
+               <?php echo $is_constant_override ? 'disabled' : ''; ?>>
+        <?php if ($is_constant_override): ?>
+            <p class="description" style="color: #d63638;">
+                <strong><?php esc_html_e('Overridden by EVENT_BUS_NAME constant:', 'eventbridge-post-events'); ?></strong>
+                <code><?php echo esc_html($current_value); ?></code>
+            </p>
+        <?php else: ?>
+            <p class="description">
+                <?php esc_html_e('The name of the EventBridge event bus (e.g., default, custom-bus) or ARN (e.g., arn:aws:events:us-east-1:123456789012:event-bus/my-bus). Max 256 characters.', 'eventbridge-post-events'); ?>
+            </p>
+        <?php endif; ?>
+        <?php
+    }
+
+    /**
+     * Render event source name field
+     */
+    public function render_event_source_name_field()
+    {
+        $value = $this->settings['event_source_name'];
+        $current_value = $this->get_setting('event_source_name');
+        $is_constant_override = defined('EVENT_SOURCE_NAME');
+        ?>
+        <input type="text"
+               name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[event_source_name]"
+               value="<?php echo esc_attr($value); ?>"
+               class="regular-text"
+               <?php echo $is_constant_override ? 'disabled' : ''; ?>>
+        <?php if ($is_constant_override): ?>
+            <p class="description" style="color: #d63638;">
+                <strong><?php esc_html_e('Overridden by EVENT_SOURCE_NAME constant:', 'eventbridge-post-events'); ?></strong>
+                <code><?php echo esc_html($current_value); ?></code>
+            </p>
+        <?php else: ?>
+            <p class="description">
+                <?php esc_html_e('The source identifier for events (e.g., wordpress, com.example.app, aws.partner/source). Max 256 characters.', 'eventbridge-post-events'); ?>
+            </p>
+        <?php endif; ?>
+        <?php
+    }
+
+    /**
+     * Render AWS region override field
+     */
+    public function render_aws_region_field()
+    {
+        $value = $this->settings['aws_region_override'];
+        $current_value = $this->get_setting('aws_region_override');
+        $is_constant_override = defined('AWS_REGION_OVERRIDE');
+        $detected_region = $this->region;
+        ?>
+        <input type="text"
+               name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[aws_region_override]"
+               value="<?php echo esc_attr($value); ?>"
+               class="regular-text"
+               placeholder="<?php echo esc_attr($detected_region); ?>"
+               <?php echo $is_constant_override ? 'disabled' : ''; ?>>
+        <?php if ($is_constant_override): ?>
+            <p class="description" style="color: #d63638;">
+                <strong><?php esc_html_e('Overridden by AWS_REGION_OVERRIDE constant:', 'eventbridge-post-events'); ?></strong>
+                <code><?php echo esc_html($current_value); ?></code>
+            </p>
+        <?php else: ?>
+            <p class="description">
+                <?php
+                printf(
+                    esc_html__('Override the detected AWS region (%s). Leave blank to use instance metadata. Format: us-east-1, ap-northeast-1, etc.', 'eventbridge-post-events'),
+                    '<code>' . esc_html($detected_region) . '</code>'
+                );
+                ?>
+            </p>
+        <?php endif; ?>
+        <?php
     }
 
     /**
@@ -911,6 +1200,27 @@ class EventBridgePostEvents
     }
 
     /**
+     * Display and delete transient messages
+     * Reduces duplication for displaying settings errors stored in transients
+     *
+     * @param string $transient_name The transient name to check and display
+     */
+    private function display_transient_messages($transient_name)
+    {
+        $messages = get_transient($transient_name);
+        if ($messages) {
+            foreach ($messages as $message) {
+                printf(
+                    '<div class="notice notice-%s is-dismissible"><p>%s</p></div>',
+                    esc_attr($message['type']),
+                    esc_html($message['message'])
+                );
+            }
+            delete_transient($transient_name);
+        }
+    }
+
+    /**
      * Render settings page
      */
     public function render_settings_page()
@@ -923,6 +1233,14 @@ class EventBridgePostEvents
             <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
 
             <?php
+            // Display settings errors/success messages
+            settings_errors('eventbridge_test');
+            settings_errors('eventbridge_metrics');
+
+            // Display transient messages
+            $this->display_transient_messages('eventbridge_test_result');
+            $this->display_transient_messages('eventbridge_metrics_result');
+
             // Display current metrics
             $metrics = get_option(self::OPTION_METRICS, array(
                 'successful_events' => 0,
@@ -930,16 +1248,52 @@ class EventBridgePostEvents
                 'transient_failures' => 0,
                 'permanent_failures' => 0
             ));
+            $failure_details = get_option(self::OPTION_FAILURE_DETAILS, array('last_failure_time' => null, 'messages' => array()));
+
+            // Use effective region (respects aws_region_override setting)
+            $effective_region = $this->get_effective_region();
             ?>
-            <div class="card" style="max-width:600px;margin-bottom:20px;">
-                <h2><?php esc_html_e('送信統計', 'eventbridge-post-events'); ?></h2>
+
+            <!-- Diagnostics & Status Section -->
+            <div class="card" style="max-width:800px;margin-bottom:20px;">
+                <h2><?php esc_html_e('Diagnostics & Status', 'eventbridge-post-events'); ?></h2>
                 <table class="form-table">
                     <tr>
-                        <th><?php esc_html_e('成功', 'eventbridge-post-events'); ?></th>
+                        <th><?php esc_html_e('Detected Region', 'eventbridge-post-events'); ?></th>
+                        <td><code><?php echo esc_html($effective_region ?: __('Not detected', 'eventbridge-post-events')); ?></code></td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('Credential Source', 'eventbridge-post-events'); ?></th>
+                        <td><code><?php echo esc_html($this->credential_source ?: __('Unknown', 'eventbridge-post-events')); ?></code></td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('Event Bus Name', 'eventbridge-post-events'); ?></th>
+                        <td>
+                            <code><?php echo esc_html($this->get_setting('event_bus_name')); ?></code>
+                            <?php if (defined('EVENT_BUS_NAME')): ?>
+                                <span style="color:#d63638;"> (<?php esc_html_e('constant override', 'eventbridge-post-events'); ?>)</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th><?php esc_html_e('Event Source Name', 'eventbridge-post-events'); ?></th>
+                        <td>
+                            <code><?php echo esc_html($this->get_setting('event_source_name')); ?></code>
+                            <?php if (defined('EVENT_SOURCE_NAME')): ?>
+                                <span style="color:#d63638;"> (<?php esc_html_e('constant override', 'eventbridge-post-events'); ?>)</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                </table>
+
+                <h3><?php esc_html_e('Metrics', 'eventbridge-post-events'); ?></h3>
+                <table class="form-table">
+                    <tr>
+                        <th><?php esc_html_e('Successful Events', 'eventbridge-post-events'); ?></th>
                         <td><strong style="color:green;"><?php echo esc_html($metrics['successful_events']); ?></strong></td>
                     </tr>
                     <tr>
-                        <th><?php esc_html_e('失敗', 'eventbridge-post-events'); ?></th>
+                        <th><?php esc_html_e('Failed Events', 'eventbridge-post-events'); ?></th>
                         <td><strong style="color:<?php echo $metrics['failed_events'] > 0 ? 'red' : 'inherit'; ?>;"><?php echo esc_html($metrics['failed_events']); ?></strong></td>
                     </tr>
                     <tr>
@@ -950,22 +1304,42 @@ class EventBridgePostEvents
                         <th style="padding-left:20px;"><?php esc_html_e('└ 恒久的な失敗', 'eventbridge-post-events'); ?></th>
                         <td><strong style="color:red;"><?php echo esc_html(isset($metrics['permanent_failures']) ? $metrics['permanent_failures'] : 0); ?></strong> <span class="description">(設定要確認)</span></td>
                     </tr>
+                    <?php if (!empty($failure_details['last_failure_time'])): ?>
                     <tr>
-                        <th><?php esc_html_e('リージョン', 'eventbridge-post-events'); ?></th>
-                        <td><?php echo esc_html($this->region ?: __('未設定', 'eventbridge-post-events')); ?></td>
+                        <th><?php esc_html_e('Last Failure', 'eventbridge-post-events'); ?></th>
+                        <td>
+                            <?php echo esc_html($failure_details['last_failure_time']); ?>
+                            <?php if (!empty($failure_details['messages'])):
+                                $last_index = count($failure_details['messages']) - 1;
+                                $last_message = isset($failure_details['messages'][$last_index]['message']) ? $failure_details['messages'][$last_index]['message'] : '';
+                            ?>
+                                <br><span class="description" style="color:#d63638;"><?php echo esc_html($last_message); ?></span>
+                            <?php endif; ?>
+                        </td>
                     </tr>
-                    <tr>
-                        <th><?php esc_html_e('イベントバス', 'eventbridge-post-events'); ?></th>
-                        <td><?php echo esc_html(EVENT_BUS_NAME); ?></td>
-                    </tr>
+                    <?php endif; ?>
                 </table>
+
+                <div>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;">
+                        <?php wp_nonce_field('eventbridge_test_connection', 'eventbridge_test_nonce'); ?>
+                        <input type="hidden" name="action" value="eventbridge_test_connection">
+                        <?php submit_button(__('Test Connection', 'eventbridge-post-events'), 'secondary', 'test_connection', false); ?>
+                    </form>
+
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;margin-left:10px;">
+                        <?php wp_nonce_field('eventbridge_reset_metrics', 'eventbridge_reset_nonce'); ?>
+                        <input type="hidden" name="action" value="eventbridge_reset_metrics">
+                        <?php submit_button(__('Reset Metrics', 'eventbridge-post-events'), 'secondary', 'reset_metrics', false); ?>
+                    </form>
+                </div>
             </div>
 
             <form action="options.php" method="post">
                 <?php
                 settings_fields('eventbridge_settings_group');
                 do_settings_sections('eventbridge-settings');
-                submit_button(__('設定を保存', 'eventbridge-post-events'));
+                submit_button(__('Save Settings', 'eventbridge-post-events'));
                 ?>
             </form>
         </div>
@@ -1382,7 +1756,7 @@ class EventBridgePostEvents
             return;
         }
 
-        $this->dispatch_event(EVENT_SOURCE_NAME, $event_name, $event_payload);
+        $this->dispatch_event($this->get_setting('event_source_name'), $event_name, $event_payload);
     }
 
     /**
@@ -1411,7 +1785,7 @@ class EventBridgePostEvents
         );
 
         $event_payload = $this->prepare_event_payload($event_data, $post_id, true);
-        $this->dispatch_event(EVENT_SOURCE_NAME, $event_name, $event_payload);
+        $this->dispatch_event($this->get_setting('event_source_name'), $event_name, $event_payload);
     }
 
     /**
@@ -1456,7 +1830,7 @@ class EventBridgePostEvents
      */
     private function do_send_event($source, $detailType, $detail)
     {
-        $result = $this->client->sendEvent($source, $detailType, $detail);
+        $result = $this->get_client()->sendEvent($source, $detailType, $detail);
         $this->track_event_result($result);
 
         if (!$result['success']) {
@@ -1515,7 +1889,7 @@ class EventBridgePostEvents
         );
 
         // 非同期でEventBridgeに送信（UIをブロックしない）
-        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array(EVENT_SOURCE_NAME, $event_name, $event_data));
+        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array($this->get_setting('event_source_name'), $event_name, $event_data));
     }
 
     /**
@@ -1580,7 +1954,7 @@ class EventBridgePostEvents
             </p>
             <ol>
                 <li><?php esc_html_e('Check your AWS EventBridge credentials (AWS_EVENTBRIDGE_ACCESS_KEY_ID and AWS_EVENTBRIDGE_SECRET_ACCESS_KEY)', 'eventbridge-post-events'); ?></li>
-                <li><?php printf(esc_html__('Verify EventBridge event bus "%s" exists in region "%s"', 'eventbridge-post-events'), esc_html(EVENT_BUS_NAME), esc_html($this->region)); ?></li>
+                <li><?php printf(esc_html__('Verify EventBridge event bus "%s" exists in region "%s"', 'eventbridge-post-events'), esc_html($this->get_setting('event_bus_name')), esc_html($this->region)); ?></li>
                 <li>
                     <?php
                     // Check for known error log plugins before displaying link
@@ -1638,6 +2012,125 @@ class EventBridgePostEvents
 
         // Safely redirect to remove query parameters
         wp_safe_redirect(remove_query_arg(array('eventbridge_dismiss_notice', 'eventbridge_nonce')));
+        exit;
+    }
+
+    /**
+     * Handle test connection request
+     */
+    public function handle_test_connection()
+    {
+        // Security checks
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('You do not have permission to perform this action.', 'eventbridge-post-events'));
+        }
+
+        if (!isset($_POST['eventbridge_test_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['eventbridge_test_nonce'])), 'eventbridge_test_connection')) {
+            wp_die(esc_html__('Security check failed.', 'eventbridge-post-events'));
+        }
+
+        // Check if credentials and region are available (constructor may have bailed early)
+        if (empty($this->access_key) || empty($this->secret_key) || empty($this->region)) {
+            add_settings_error(
+                'eventbridge_test',
+                'test_error_no_credentials',
+                __('Cannot test connection: AWS credentials or region not configured. Please check your wp-config.php or EC2 instance role settings.', 'eventbridge-post-events'),
+                'error'
+            );
+            set_transient('eventbridge_test_result', get_settings_errors('eventbridge_test'), 30);
+            wp_safe_redirect(admin_url('options-general.php?page=eventbridge-settings'));
+            exit;
+        }
+
+        // Send test event
+        $test_event_data = array(
+            'test' => true,
+            'timestamp' => current_time('c'),
+            'message' => 'EventBridge connection test'
+        );
+
+        // Respect event_format setting for test event
+        $event_format = $this->get_setting('event_format');
+        if ($event_format === 'envelope') {
+            $test_event_payload = array(
+                'event_id' => wp_generate_uuid4(),
+                'event_timestamp' => current_time('c'),
+                'event_version' => '1.0',
+                'source_system' => get_bloginfo('url'),
+                'correlation_id' => wp_generate_uuid4(),
+                'data' => $test_event_data
+            );
+        } else {
+            // Legacy format - send test_event_data directly
+            $test_event_payload = $test_event_data;
+        }
+
+        $result = $this->get_client()->sendEvent(
+            $this->get_setting('event_source_name'),
+            'connection.test',
+            $test_event_payload
+        );
+
+        // Redirect with result
+        $redirect_args = array();
+        if ($result['success']) {
+            $redirect_args['eventbridge_test'] = 'success';
+            add_settings_error(
+                'eventbridge_test',
+                'test_success',
+                __('Test event sent successfully! Check your EventBridge console to verify receipt.', 'eventbridge-post-events'),
+                'success'
+            );
+        } else {
+            $redirect_args['eventbridge_test'] = 'error';
+            $error_message = isset($result['error']) ? $result['error'] : 'Unknown error';
+            add_settings_error(
+                'eventbridge_test',
+                'test_error',
+                sprintf(__('Test event failed: %s', 'eventbridge-post-events'), $error_message),
+                'error'
+            );
+        }
+
+        set_transient('eventbridge_test_result', get_settings_errors('eventbridge_test'), 30);
+        wp_safe_redirect(add_query_arg($redirect_args, admin_url('options-general.php?page=eventbridge-settings')));
+        exit;
+    }
+
+    /**
+     * Handle metrics reset request
+     */
+    public function handle_reset_metrics()
+    {
+        // Security checks
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('You do not have permission to perform this action.', 'eventbridge-post-events'));
+        }
+
+        if (!isset($_POST['eventbridge_reset_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['eventbridge_reset_nonce'])), 'eventbridge_reset_metrics')) {
+            wp_die(esc_html__('Security check failed.', 'eventbridge-post-events'));
+        }
+
+        // Reset metrics
+        $this->successful_events = 0;
+        $this->failed_events = 0;
+        $this->transient_failures = 0;
+        $this->permanent_failures = 0;
+        $this->save_metrics();
+
+        // Clear failure details
+        delete_option(self::OPTION_FAILURE_DETAILS);
+
+        // Redirect with success message
+        add_settings_error(
+            'eventbridge_metrics',
+            'metrics_reset',
+            __('Metrics have been reset successfully.', 'eventbridge-post-events'),
+            'success'
+        );
+
+        set_transient('eventbridge_metrics_result', get_settings_errors('eventbridge_metrics'), 30);
+        wp_safe_redirect(add_query_arg('eventbridge_metrics_reset', '1', admin_url('options-general.php?page=eventbridge-settings')));
         exit;
     }
 }
