@@ -8,13 +8,8 @@ Author: Your Name
 Author URI: https://example.com
 */
 
-// EventBridge設定（wp-config.phpで上書き可能）
-if (!defined('EVENT_BUS_NAME')) {
-    define('EVENT_BUS_NAME', 'wp-kyoto');
-}
-if (!defined('EVENT_SOURCE_NAME')) {
-    define('EVENT_SOURCE_NAME', 'wordpress');
-}
+// Note: EVENT_BUS_NAME, EVENT_SOURCE_NAME, and AWS_REGION_OVERRIDE can be defined in wp-config.php
+// to override admin settings. When not defined, admin settings will be used.
 
 class EventBridgePutEvents
 {
@@ -567,7 +562,7 @@ class EventBridgePostEvents
 
     /**
      * Get a specific setting value with priority resolution
-     * Priority order: constants first → WordPress options → default values
+     * Priority order: non-empty constants first → WordPress options → default values
      *
      * @param string $key Setting key
      * @return mixed Setting value
@@ -582,8 +577,12 @@ class EventBridgePostEvents
         );
 
         // Check for constant overrides first (highest priority)
+        // Only use constant if it's defined AND non-empty
         if (isset($constant_map[$key]) && defined($constant_map[$key])) {
-            return constant($constant_map[$key]);
+            $constant_value = constant($constant_map[$key]);
+            if (is_string($constant_value) && trim($constant_value) !== '') {
+                return $constant_value;
+            }
         }
 
         // Then check WordPress options (medium priority)
@@ -763,35 +762,53 @@ class EventBridgePostEvents
             ? $input['send_mode']
             : $defaults['send_mode'];
 
-        // Sanitize event_bus_name (AWS naming conventions: alphanumeric, hyphens, underscores, dots, max 256 chars)
-        $sanitized['event_bus_name'] = $this->sanitize_and_validate_setting(
-            $input,
-            'event_bus_name',
-            '/^[a-zA-Z0-9._\-]{1,256}$/',
-            'invalid_event_bus_name',
-            __('Event Bus Name must contain only alphanumeric characters, hyphens, underscores, and dots (max 256 characters).', 'eventbridge-post-events'),
-            $defaults['event_bus_name']
-        );
+        // Sanitize event_bus_name (preserve existing value if constant override is active and field is disabled)
+        // Accepts either a simple name or an ARN: arn:aws:events:REGION:ACCOUNT:event-bus/NAME
+        if (defined('EVENT_BUS_NAME') && !isset($input['event_bus_name'])) {
+            // Field was disabled due to constant override - preserve existing stored value
+            $sanitized['event_bus_name'] = isset($this->settings['event_bus_name']) ? $this->settings['event_bus_name'] : $defaults['event_bus_name'];
+        } else {
+            $sanitized['event_bus_name'] = $this->sanitize_and_validate_setting(
+                $input,
+                'event_bus_name',
+                '/^([a-zA-Z0-9._\-]{1,256}|arn:aws:events:[a-z]{2}-[a-z]+-\d{1}:\d{12}:event-bus\/[a-zA-Z0-9._\-\/]{1,256})$/',
+                'invalid_event_bus_name',
+                __('Event Bus Name must be a valid name (alphanumeric, hyphens, underscores, dots; max 256 chars) or a valid ARN (e.g., arn:aws:events:us-east-1:123456789012:event-bus/my-bus).', 'eventbridge-post-events'),
+                $defaults['event_bus_name']
+            );
+        }
 
-        // Sanitize event_source_name (AWS naming conventions: reverse domain notation)
-        $sanitized['event_source_name'] = $this->sanitize_and_validate_setting(
-            $input,
-            'event_source_name',
-            '/^[a-zA-Z0-9._\-]{1,256}$/',
-            'invalid_event_source_name',
-            __('Event Source Name must contain only alphanumeric characters, hyphens, underscores, and dots (max 256 characters).', 'eventbridge-post-events'),
-            $defaults['event_source_name']
-        );
+        // Sanitize event_source_name (preserve existing value if constant override is active and field is disabled)
+        // EventBridge Source accepts alphanumeric, dots, hyphens, underscores, and forward slashes
+        if (defined('EVENT_SOURCE_NAME') && !isset($input['event_source_name'])) {
+            // Field was disabled due to constant override - preserve existing stored value
+            $sanitized['event_source_name'] = isset($this->settings['event_source_name']) ? $this->settings['event_source_name'] : $defaults['event_source_name'];
+        } else {
+            $sanitized['event_source_name'] = $this->sanitize_and_validate_setting(
+                $input,
+                'event_source_name',
+                '/^[a-zA-Z0-9._\-\/]{1,256}$/',
+                'invalid_event_source_name',
+                __('Event Source Name must contain only alphanumeric characters, hyphens, underscores, dots, and forward slashes (max 256 characters).', 'eventbridge-post-events'),
+                $defaults['event_source_name']
+            );
+        }
 
-        // Sanitize aws_region_override (AWS region format: us-east-1, etc.)
-        $sanitized['aws_region_override'] = $this->sanitize_and_validate_setting(
-            $input,
-            'aws_region_override',
-            '/^[a-z]{2}-[a-z]+-\d{1}$/',
-            'invalid_aws_region',
-            __('AWS Region Override must be in valid format (e.g., us-east-1, ap-northeast-1).', 'eventbridge-post-events'),
-            $defaults['aws_region_override']
-        );
+        // Sanitize aws_region_override (preserve existing value if constant override is active and field is disabled)
+        // Allow empty value to clear the override
+        if (defined('AWS_REGION_OVERRIDE') && !isset($input['aws_region_override'])) {
+            // Field was disabled due to constant override - preserve existing stored value
+            $sanitized['aws_region_override'] = isset($this->settings['aws_region_override']) ? $this->settings['aws_region_override'] : $defaults['aws_region_override'];
+        } else {
+            $sanitized['aws_region_override'] = $this->sanitize_and_validate_setting(
+                $input,
+                'aws_region_override',
+                '/^[a-z]{2}-[a-z]+-\d{1}$/',
+                'invalid_aws_region',
+                __('AWS Region Override must be in valid format (e.g., us-east-1, ap-northeast-1).', 'eventbridge-post-events'),
+                $defaults['aws_region_override']
+            );
+        }
 
         // Sanitize enabled_post_types
         $sanitized['enabled_post_types'] = array();
@@ -875,7 +892,7 @@ class EventBridgePostEvents
             </p>
         <?php else: ?>
             <p class="description">
-                <?php esc_html_e('The name of the EventBridge event bus (e.g., default, custom-bus). Only alphanumeric characters, hyphens, underscores, and dots allowed (max 256 characters).', 'eventbridge-post-events'); ?>
+                <?php esc_html_e('The name of the EventBridge event bus (e.g., default, custom-bus) or ARN (e.g., arn:aws:events:us-east-1:123456789012:event-bus/my-bus). Max 256 characters.', 'eventbridge-post-events'); ?>
             </p>
         <?php endif; ?>
         <?php
@@ -902,7 +919,7 @@ class EventBridgePostEvents
             </p>
         <?php else: ?>
             <p class="description">
-                <?php esc_html_e('The source identifier for events (e.g., wordpress, com.example.app). Use reverse domain notation. Only alphanumeric characters, hyphens, underscores, and dots allowed (max 256 characters).', 'eventbridge-post-events'); ?>
+                <?php esc_html_e('The source identifier for events (e.g., wordpress, com.example.app, aws.partner/source). Max 256 characters.', 'eventbridge-post-events'); ?>
             </p>
         <?php endif; ?>
         <?php
@@ -1922,6 +1939,19 @@ class EventBridgePostEvents
 
         if (!isset($_POST['eventbridge_test_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['eventbridge_test_nonce'])), 'eventbridge_test_connection')) {
             wp_die(esc_html__('Security check failed.', 'eventbridge-post-events'));
+        }
+
+        // Check if credentials and region are available (constructor may have bailed early)
+        if (empty($this->access_key) || empty($this->secret_key) || empty($this->region)) {
+            add_settings_error(
+                'eventbridge_test',
+                'test_error_no_credentials',
+                __('Cannot test connection: AWS credentials or region not configured. Please check your wp-config.php or EC2 instance role settings.', 'eventbridge-post-events'),
+                'error'
+            );
+            set_transient('eventbridge_test_result', get_settings_errors('eventbridge_test'), 30);
+            wp_safe_redirect(admin_url('options-general.php?page=eventbridge-settings'));
+            exit;
         }
 
         // Send test event
