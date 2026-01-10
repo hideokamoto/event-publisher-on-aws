@@ -20,11 +20,12 @@ class EventBridgePutEvents
 
     private $accessKeyId;
     private $secretAccessKey;
+    private $sessionToken;
     private $region;
     private $endpoint;
     private $serviceName;
 
-    public function __construct($accessKeyId, $secretAccessKey, $region)
+    public function __construct($accessKeyId, $secretAccessKey, $region, $sessionToken = null)
     {
         // Validate credential parameters
         if (empty($accessKeyId) || empty($secretAccessKey)) {
@@ -38,6 +39,7 @@ class EventBridgePutEvents
 
         $this->accessKeyId = $accessKeyId;
         $this->secretAccessKey = $secretAccessKey;
+        $this->sessionToken = $sessionToken;
         $this->region = $region;
         $this->endpoint = 'events.' . $region . '.amazonaws.com';
         $this->serviceName = 'events';
@@ -62,8 +64,15 @@ class EventBridgePutEvents
         $amzDate = $now->format('Ymd\THis\Z');
         $dateStamp = $now->format('Ymd');
 
-        $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-target:AWSEvents.PutEvents\n";
-        $signedHeaders = 'content-type;host;x-amz-date;x-amz-target';
+        // Include session token in signature if present (for temporary credentials)
+        if (!empty($this->sessionToken)) {
+            $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-security-token:{$this->sessionToken}\nx-amz-target:AWSEvents.PutEvents\n";
+            $signedHeaders = 'content-type;host;x-amz-date;x-amz-security-token;x-amz-target';
+        } else {
+            $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-target:AWSEvents.PutEvents\n";
+            $signedHeaders = 'content-type;host;x-amz-date;x-amz-target';
+        }
+
         $canonicalRequest = implode("\n", array(
             $method,
             $path,
@@ -95,6 +104,11 @@ class EventBridgePutEvents
             'X-Amz-Target' => 'AWSEvents.PutEvents',
             'Authorization' => $authorizationHeader,
         );
+
+        // Add session token to headers if present (for temporary credentials)
+        if (!empty($this->sessionToken)) {
+            $headers['X-Amz-Security-Token'] = $this->sessionToken;
+        }
 
         // Retry configuration
         $maxRetries = 3;
@@ -346,7 +360,12 @@ class EventBridgePostEvents
     // IMDS cache transient keys
     const TRANSIENT_IMDS_TOKEN = 'eventbridge_imds_token';
     const TRANSIENT_IMDS_IDENTITY = 'eventbridge_imds_identity';
+    const TRANSIENT_IMDS_CREDENTIALS = 'eventbridge_imds_credentials';
     const TRANSIENT_IMDS_FAILED = 'eventbridge_imds_failed';
+
+    // IMDS configuration
+    const IMDS_BASE_URL = 'http://169.254.169.254';
+    const IMDS_TIMEOUT = 2;
 
     // IMDS cache durations
     const IMDS_TOKEN_CACHE_DURATION = 21000; // 5h50m (10 min before 6h expiry for safety)
@@ -361,10 +380,10 @@ class EventBridgePostEvents
     private $settings;
 
     /**
-     * Get AWS credentials from environment variables or WordPress constants
-     * Resolution order: environment variables → WordPress constants → null
+     * Get AWS credentials from environment variables, WordPress constants, or EC2 instance role
+     * Resolution order: environment variables → WordPress constants → EC2 instance role → null
      *
-     * @return array|null Array with 'access_key_id', 'secret_access_key', and 'source', or null if not available
+     * @return array|null Array with 'access_key_id', 'secret_access_key', 'session_token' (optional), and 'source', or null if not available
      */
     private function get_aws_credentials()
     {
@@ -392,6 +411,17 @@ class EventBridgePostEvents
                     'source' => 'constants'
                 );
             }
+        }
+
+        // Fallback to EC2 instance role credentials
+        $instance_creds = $this->get_instance_credentials();
+        if ($instance_creds !== null) {
+            return array(
+                'access_key_id' => $instance_creds['AccessKeyId'],
+                'secret_access_key' => $instance_creds['SecretAccessKey'],
+                'session_token' => $instance_creds['Token'],
+                'source' => 'instance_role'
+            );
         }
 
         return null;
@@ -507,13 +537,13 @@ class EventBridgePostEvents
         add_action('admin_menu', array($this, 'add_settings_menu'));
         add_action('admin_init', array($this, 'register_settings'));
 
-        // Get AWS credentials using resolution order: env vars → constants → null
+        // Get AWS credentials using resolution order: env vars → constants → instance role
         $credentials = $this->get_aws_credentials();
         if ($credentials === null) {
             add_action('admin_notices', function() {
                 ?>
                 <div class="notice notice-error">
-                    <p><?php esc_html_e('EventBridge Post Events: AWS認証情報が設定されていません。環境変数（AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY）またはwp-config.phpの定数（AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY）を設定してください。', 'eventbridge-post-events'); ?></p>
+                    <p><?php esc_html_e('EventBridge Post Events: AWS認証情報が設定されていません。環境変数（AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY）、wp-config.phpの定数（AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY）、またはEC2インスタンスロールを設定してください。', 'eventbridge-post-events'); ?></p>
                 </div>
                 <?php
             });
@@ -532,7 +562,8 @@ class EventBridgePostEvents
             $this->client = new EventBridgePutEvents(
                 $credentials['access_key_id'],
                 $credentials['secret_access_key'],
-                $this->region
+                $this->region,
+                isset($credentials['session_token']) ? $credentials['session_token'] : null
             );
         } catch (Exception $e) {
             add_action('admin_notices', function() use ($e) {
@@ -885,12 +916,12 @@ class EventBridgePostEvents
         }
 
         // Request new token with 6-hour TTL (21600 seconds)
-        $response = wp_remote_request('http://169.254.169.254/latest/api/token', array(
+        $response = wp_remote_request(self::IMDS_BASE_URL . '/latest/api/token', array(
             'method' => 'PUT',
             'headers' => array(
                 'X-aws-ec2-metadata-token-ttl-seconds' => '21600'
             ),
-            'timeout' => 2
+            'timeout' => self::IMDS_TIMEOUT
         ));
 
         if (is_wp_error($response)) {
@@ -952,11 +983,11 @@ class EventBridgePostEvents
         }
 
         // Request instance identity document with IMDSv2 token
-        $response = wp_remote_get('http://169.254.169.254/latest/dynamic/instance-identity/document', array(
+        $response = wp_remote_get(self::IMDS_BASE_URL . '/latest/dynamic/instance-identity/document', array(
             'headers' => array(
                 'X-aws-ec2-metadata-token' => $token
             ),
-            'timeout' => 2
+            'timeout' => self::IMDS_TIMEOUT
         ));
 
         if (is_wp_error($response)) {
@@ -991,6 +1022,113 @@ class EventBridgePostEvents
         // Cache successful result for 1 hour
         set_transient(self::TRANSIENT_IMDS_IDENTITY, $identity, self::IMDS_IDENTITY_CACHE_DURATION);
         return $identity;
+    }
+
+    /**
+     * EC2インスタンスロールから一時的な認証情報を取得する (IMDSv2 with smart caching)
+     *
+     * Retrieves temporary credentials with expiration-aware caching.
+     * Only attempts IMDS in admin or wp-cron contexts to avoid frontend performance impact.
+     *
+     * @return array|null Array with AccessKeyId, SecretAccessKey, Token, Expiration or null on failure
+     */
+    private function get_instance_credentials()
+    {
+        // Only try instance credentials in admin or wp-cron contexts
+        $should_try_imds = is_admin() || (defined('DOING_CRON') && DOING_CRON);
+        if (!$should_try_imds) {
+            return null;
+        }
+
+        // Check cached credentials
+        $cached = get_transient(self::TRANSIENT_IMDS_CREDENTIALS);
+        if ($cached !== false) {
+            // Check if expiration is approaching (within 5 minutes)
+            if (isset($cached['Expiration'])) {
+                $expiration = strtotime($cached['Expiration']);
+                $now = time();
+                // Use cached credentials if more than 5 minutes until expiry
+                if ($expiration - $now > 300) {
+                    return $cached;
+                }
+                // Credentials expire soon, delete cache and refresh
+                delete_transient(self::TRANSIENT_IMDS_CREDENTIALS);
+            } else {
+                return $cached;
+            }
+        }
+
+        // Check failure cache
+        if (get_transient(self::TRANSIENT_IMDS_FAILED) !== false) {
+            return null;
+        }
+
+        // Get IMDSv2 token
+        $token = $this->get_imdsv2_token();
+        if ($token === null) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        // Get IAM role name
+        $role_response = wp_remote_get(self::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/', array(
+            'headers' => array('X-aws-ec2-metadata-token' => $token),
+            'timeout' => self::IMDS_TIMEOUT,
+        ));
+
+        if (is_wp_error($role_response) || wp_remote_retrieve_response_code($role_response) !== 200) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        $role_name = trim(wp_remote_retrieve_body($role_response));
+        if (empty($role_name)) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        // Get credentials for the role
+        $creds_response = wp_remote_get(self::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/' . $role_name, array(
+            'headers' => array('X-aws-ec2-metadata-token' => $token),
+            'timeout' => self::IMDS_TIMEOUT,
+        ));
+
+        if (is_wp_error($creds_response) || wp_remote_retrieve_response_code($creds_response) !== 200) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        $creds = json_decode(wp_remote_retrieve_body($creds_response), true);
+
+        // Validate credentials
+        if (json_last_error() !== JSON_ERROR_NONE ||
+            empty($creds['AccessKeyId']) ||
+            empty($creds['SecretAccessKey']) ||
+            !isset($creds['Token'])) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        $credentials = array(
+            'AccessKeyId' => $creds['AccessKeyId'],
+            'SecretAccessKey' => $creds['SecretAccessKey'],
+            'Token' => $creds['Token'],
+            'Expiration' => isset($creds['Expiration']) ? $creds['Expiration'] : null,
+        );
+
+        // Calculate cache duration based on expiration (5 min safety margin)
+        $cache_duration = self::IMDS_IDENTITY_CACHE_DURATION;
+        if (isset($creds['Expiration'])) {
+            $expiration = strtotime($creds['Expiration']);
+            $now = time();
+            $time_until_expiry = $expiration - $now - 300; // 5 min margin
+            if ($time_until_expiry > 0) {
+                $cache_duration = min($cache_duration, $time_until_expiry);
+            }
+        }
+
+        set_transient(self::TRANSIENT_IMDS_CREDENTIALS, $credentials, $cache_duration);
+        return $credentials;
     }
 
     /**
