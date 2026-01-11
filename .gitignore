@@ -1,3 +1,25 @@
 node_modules
 *.js
 index.html
+
+# Composer dependencies (NEVER distribute vendor/ with plugin)
+/vendor/
+composer.lock
+
+# PHPUnit
+.phpunit.result.cache
+/phpunit.xml
+
+# wp-env
+/.wp-env.override.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

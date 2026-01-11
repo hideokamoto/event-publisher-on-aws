@@ -4,7 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "wp-now start"
+    "dev": "wp-now start",
+    "wp-env": "wp-env",
+    "test:setup": "wp-env start && wp-env run tests-cli --env-cwd=wp-content/plugins/event-publisher-on-aws composer install --no-interaction",
+    "test:unit": "wp-env run tests-cli --env-cwd=wp-content/plugins/event-publisher-on-aws vendor/bin/phpunit --testsuite unit",
+    "test:integration": "wp-env run tests-cli --env-cwd=wp-content/plugins/event-publisher-on-aws vendor/bin/phpunit --testsuite integration",
+    "test": "npm run test:unit && npm run test:integration"
   },
   "keywords": [],
   "author": "hideokamoto",

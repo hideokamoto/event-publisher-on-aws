@@ -1,0 +1,181 @@
+name: PHPUnit Tests
+
+on:
+  push:
+    branches: [ main, develop, claude/** ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php-version }} - WP ${{ matrix.wp-version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.1', '8.2', '8.3']
+        wp-version: ['6.5', '6.6', '6.7', 'latest']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: mysqli, mbstring, json, xml
+          coverage: none
+          tools: composer
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Configure wp-env for PHP version
+        run: |
+          # Translate 'latest' to null (default latest stable) for wp-env
+          WP_VERSION="${{ matrix.wp-version }}"
+          if [ "$WP_VERSION" = "latest" ]; then
+            WP_CORE_VALUE="null"
+          else
+            WP_CORE_VALUE="\"WordPress/WordPress#$WP_VERSION\""
+          fi
+
+          cat > .wp-env.override.json << EOF
+          {
+            "core": $WP_CORE_VALUE,
+            "phpVersion": "${{ matrix.php-version }}",
+            "plugins": ["."]
+          }
+          EOF
+          cat .wp-env.override.json
+
+      - name: Start wp-env
+        run: npm run wp-env start
+
+      - name: Install Composer dependencies in wp-env
+        run: npm run test:setup
+
+      - name: Verify vendor directory is not in plugin root
+        run: |
+          if [ -d "vendor" ]; then
+            echo "ERROR: vendor/ directory found in plugin root. This directory must never be distributed with the plugin."
+            echo "Composer dependencies are dev-only and should only exist inside wp-env container."
+            exit 1
+          fi
+          echo "✓ Verified: vendor/ directory not present in plugin distribution"
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Run integration tests
+        run: npm run test:integration
+
+      - name: Stop wp-env
+        if: always()
+        run: npm run wp-env stop
+
+  verify-no-production-dependencies:
+    name: Verify No Production Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify composer.json has no production dependencies
+        run: |
+          # Check that composer.json require section only has PHP version requirement, no packages
+          # Use jq to parse JSON properly
+          if ! command -v jq &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+
+          # Get the require section as JSON
+          REQUIRE_SECTION=$(jq -r '.require // {}' composer.json)
+
+          # Count the number of keys in require section
+          KEY_COUNT=$(echo "$REQUIRE_SECTION" | jq 'length')
+
+          if [ "$KEY_COUNT" -eq 0 ]; then
+            echo "✓ Verified: 'require' section is empty"
+          elif [ "$KEY_COUNT" -eq 1 ]; then
+            # Check if the only key is 'php'
+            PHP_KEY=$(echo "$REQUIRE_SECTION" | jq -r 'has("php")')
+            if [ "$PHP_KEY" = "true" ]; then
+              PHP_VERSION=$(echo "$REQUIRE_SECTION" | jq -r '.php')
+              echo "✓ Verified: 'require' section only contains PHP version requirement: $PHP_VERSION"
+            else
+              echo "ERROR: composer.json contains production package dependencies in 'require' section"
+              echo "This plugin must use ONLY dev dependencies (require-dev)"
+              echo "Only 'php' version requirement is allowed in 'require'"
+              echo "Found: $REQUIRE_SECTION"
+              exit 1
+            fi
+          else
+            echo "ERROR: composer.json contains multiple entries in 'require' section"
+            echo "This plugin must use ONLY dev dependencies (require-dev)"
+            echo "Only 'php' version requirement is allowed in 'require'"
+            echo "Found: $REQUIRE_SECTION"
+            exit 1
+          fi
+
+      - name: Verify vendor directory is in .gitignore
+        run: |
+          if ! grep -q "vendor" .gitignore; then
+            echo "ERROR: vendor/ directory must be listed in .gitignore"
+            exit 1
+          fi
+          echo "✓ Verified: vendor/ directory is in .gitignore"
+
+      - name: Verify vendor directory does not exist in repository
+        run: |
+          if [ -d "vendor" ]; then
+            echo "ERROR: vendor/ directory found in repository"
+            echo "This directory must never be committed to the repository"
+            exit 1
+          fi
+          echo "✓ Verified: vendor/ directory not present in repository"
+
+      - name: Check for accidental dependency commits
+        run: |
+          # Verify no Composer lock file is committed (it's for dev only)
+          if [ -f "composer.lock" ] && git ls-files --error-unmatch composer.lock 2>/dev/null; then
+            echo "WARNING: composer.lock is committed to repository"
+            echo "Consider adding it to .gitignore as it's only needed for development"
+          fi
+          echo "✓ Dependency commit check complete"
+
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [test, verify-no-production-dependencies]
+    if: always()
+
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.verify-no-production-dependencies.result }}" != "success" ]; then
+            echo "Tests failed or verification failed"
+            exit 1
+          fi
+          echo "All tests passed successfully!"
