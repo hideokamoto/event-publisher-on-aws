@@ -580,6 +580,7 @@ class EventBridgePostEvents
     const TRANSIENT_IMDS_IDENTITY = 'eventbridge_imds_identity';
     const TRANSIENT_IMDS_CREDENTIALS = 'eventbridge_imds_credentials';
     const TRANSIENT_IMDS_FAILED = 'eventbridge_imds_failed';
+    const TRANSIENT_CACHED_REGION = 'eventbridge_cached_region';
 
     // IMDS configuration
     const IMDS_BASE_URL = 'http://169.254.169.254';
@@ -589,6 +590,7 @@ class EventBridgePostEvents
     const IMDS_TOKEN_CACHE_DURATION = 21000; // 5h50m (10 min before 6h expiry for safety)
     const IMDS_IDENTITY_CACHE_DURATION = 3600; // 1 hour for successful lookups
     const IMDS_FAILED_CACHE_DURATION = 300;    // 5 minutes for failed lookups
+    const REGION_CACHE_DURATION = 86400;       // 24 hours for cached region from IMDS
 
     // Valid setting values
     const VALID_EVENT_FORMATS = array('legacy', 'envelope');
@@ -608,13 +610,21 @@ class EventBridgePostEvents
         // Check environment variables (getenv, $_ENV, $_SERVER)
         $env_access_key = $this->get_env_var('AWS_ACCESS_KEY_ID');
         $env_secret_key = $this->get_env_var('AWS_SECRET_ACCESS_KEY');
+        $env_session_token = $this->get_env_var('AWS_SESSION_TOKEN');
 
         if (!empty($env_access_key) && !empty($env_secret_key)) {
-            return array(
+            $credentials = array(
                 'access_key_id' => $env_access_key,
                 'secret_access_key' => $env_secret_key,
                 'source' => 'environment'
             );
+
+            // Include session token if present (for temporary credentials)
+            if (!empty($env_session_token)) {
+                $credentials['session_token'] = $env_session_token;
+            }
+
+            return $credentials;
         }
 
         // Fallback to WordPress constants
@@ -675,15 +685,16 @@ class EventBridgePostEvents
 
     /**
      * Validate and detect AWS region
-     * Resolution order: EVENT_BRIDGE_REGION constant → EC2 metadata → 'us-east-1' default
+     * Resolution order: EVENT_BRIDGE_REGION constant → cached region → EC2 metadata → 'us-east-1' default
      *
-     * IMDS is only attempted in admin or wp-cron contexts to avoid frontend performance impact.
+     * IMDS is only attempted in admin or wp-cron contexts. The detected region is cached for 24 hours
+     * so frontend requests can use the cached value instead of falling back to 'us-east-1'.
      *
      * @return array Array with 'region' and 'source'
      */
     private function get_aws_region()
     {
-        // Try EVENT_BRIDGE_REGION constant first
+        // Try EVENT_BRIDGE_REGION constant first (highest priority)
         if (defined('EVENT_BRIDGE_REGION')) {
             $region = constant('EVENT_BRIDGE_REGION');
             if ($this->validate_region_format($region)) {
@@ -699,6 +710,20 @@ class EventBridgePostEvents
             }
         }
 
+        // Check cached region (from previous IMDS detection in admin/cron)
+        $cached_region_data = get_transient(self::TRANSIENT_CACHED_REGION);
+        if ($cached_region_data !== false && is_array($cached_region_data)) {
+            if (isset($cached_region_data['region']) && $this->validate_region_format($cached_region_data['region'])) {
+                return array(
+                    'region' => $cached_region_data['region'],
+                    'source' => $cached_region_data['source'] . '_cached'
+                );
+            } else {
+                // Invalid cached region, delete it
+                delete_transient(self::TRANSIENT_CACHED_REGION);
+            }
+        }
+
         // Only try IMDS in admin or wp-cron contexts to avoid frontend performance impact
         $should_try_imds = is_admin() || (defined('DOING_CRON') && DOING_CRON);
 
@@ -708,24 +733,34 @@ class EventBridgePostEvents
             if (isset($identity['region']) && !empty($identity['region'])) {
                 $region = $identity['region'];
                 if ($this->validate_region_format($region)) {
-                    return array(
+                    $region_data = array(
                         'region' => $region,
                         'source' => 'metadata'
                     );
+
+                    // Cache the detected region for 24 hours so frontend can use it
+                    set_transient(self::TRANSIENT_CACHED_REGION, $region_data, self::REGION_CACHE_DURATION);
+
+                    return $region_data;
                 } else {
                     error_log(sprintf(
                         '[EventBridge] Region from metadata has invalid format: %s',
                         $region
                     ));
+                    // Delete any stale cache since detection returned invalid format
+                    delete_transient(self::TRANSIENT_CACHED_REGION);
                 }
+            } else {
+                // IMDS detection failed or returned empty, delete stale cache
+                delete_transient(self::TRANSIENT_CACHED_REGION);
             }
         }
 
         // Fallback to us-east-1
         if (!$should_try_imds) {
-            error_log('[EventBridge] Skipping IMDS on frontend, using fallback region: us-east-1');
+            error_log('[EventBridge] Frontend request: Using fallback region us-east-1 (no cached region available)');
         } else {
-            error_log('[EventBridge] Using fallback region: us-east-1');
+            error_log('[EventBridge] IMDS detection failed: Using fallback region us-east-1');
         }
         return array(
             'region' => 'us-east-1',
