@@ -104,25 +104,39 @@ jobs:
 
       - name: Verify composer.json has no production dependencies
         run: |
-          # Check that composer.json require section is empty or only has PHP version
-          # Extract the line with "require" (not "require-dev")
-          REQUIRE_LINE=$(grep -E '^\s*"require"\s*:\s*\{' composer.json || true)
+          # Check that composer.json require section only has PHP version requirement, no packages
+          # Use jq to parse JSON properly
+          if ! command -v jq &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
 
-          if [ ! -z "$REQUIRE_LINE" ]; then
-            # Check if it's an empty object: "require": {} or "require": {},
-            if echo "$REQUIRE_LINE" | grep -qE '^\s*"require"\s*:\s*\{\s*\}'; then
-              echo "✓ Verified: 'require' section is empty"
+          # Get the require section as JSON
+          REQUIRE_SECTION=$(jq -r '.require // {}' composer.json)
+
+          # Count the number of keys in require section
+          KEY_COUNT=$(echo "$REQUIRE_SECTION" | jq 'length')
+
+          if [ "$KEY_COUNT" -eq 0 ]; then
+            echo "✓ Verified: 'require' section is empty"
+          elif [ "$KEY_COUNT" -eq 1 ]; then
+            # Check if the only key is 'php'
+            PHP_KEY=$(echo "$REQUIRE_SECTION" | jq -r 'has("php")')
+            if [ "$PHP_KEY" = "true" ]; then
+              PHP_VERSION=$(echo "$REQUIRE_SECTION" | jq -r '.php')
+              echo "✓ Verified: 'require' section only contains PHP version requirement: $PHP_VERSION"
             else
-              # If not empty, check what's inside (should only be php version if anything)
-              # This is more complex, so let's just verify it matches the pattern: "require": {}
-              echo "ERROR: composer.json contains production dependencies in 'require' section"
+              echo "ERROR: composer.json contains production package dependencies in 'require' section"
               echo "This plugin must use ONLY dev dependencies (require-dev)"
-              echo "The 'require' section must be empty: \"require\": {}"
-              echo "Found: $REQUIRE_LINE"
+              echo "Only 'php' version requirement is allowed in 'require'"
+              echo "Found: $REQUIRE_SECTION"
               exit 1
             fi
           else
-            echo "✓ Verified: no 'require' section found (only require-dev)"
+            echo "ERROR: composer.json contains multiple entries in 'require' section"
+            echo "This plugin must use ONLY dev dependencies (require-dev)"
+            echo "Only 'php' version requirement is allowed in 'require'"
+            echo "Found: $REQUIRE_SECTION"
+            exit 1
           fi
 
       - name: Verify vendor directory is in .gitignore

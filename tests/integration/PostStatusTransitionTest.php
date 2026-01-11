@@ -31,6 +31,25 @@ class PostStatusTransitionTest extends WP_UnitTestCase
     }
 
     /**
+     * Helper method to count scheduled eventbridge_async_send_event cron jobs
+     *
+     * @return int Number of scheduled events
+     */
+    private function count_scheduled_eventbridge_events()
+    {
+        $cron_array = _get_cron_array();
+        $count = 0;
+        if ($cron_array) {
+            foreach ($cron_array as $timestamp => $hooks) {
+                if (isset($hooks['eventbridge_async_send_event'])) {
+                    $count += count($hooks['eventbridge_async_send_event']);
+                }
+            }
+        }
+        return $count;
+    }
+
+    /**
      * Mock HTTP requests for EC2 metadata service and EventBridge API
      */
     public function mock_http_requests($preempt, $args, $url)
@@ -183,15 +202,7 @@ class PostStatusTransitionTest extends WP_UnitTestCase
     public function test_async_event_scheduling()
     {
         // Get current scheduled events count
-        $cron_array = _get_cron_array();
-        $initial_count = 0;
-        if ($cron_array) {
-            foreach ($cron_array as $timestamp => $hooks) {
-                if (isset($hooks['eventbridge_async_send_event'])) {
-                    $initial_count += count($hooks['eventbridge_async_send_event']);
-                }
-            }
-        }
+        $initial_count = $this->count_scheduled_eventbridge_events();
 
         // Create a published post
         $post_id = $this->factory()->post->create([
@@ -199,16 +210,14 @@ class PostStatusTransitionTest extends WP_UnitTestCase
             'post_status' => 'publish',
         ]);
 
+        // Verify post was created
+        $this->assertGreaterThan(0, $post_id, 'Post should be created');
+        $post = get_post($post_id);
+        $this->assertNotNull($post, 'Post should exist');
+        $this->assertEquals('publish', $post->post_status, 'Post should be published');
+
         // Check that event was scheduled
-        $cron_array = _get_cron_array();
-        $new_count = 0;
-        if ($cron_array) {
-            foreach ($cron_array as $timestamp => $hooks) {
-                if (isset($hooks['eventbridge_async_send_event'])) {
-                    $new_count += count($hooks['eventbridge_async_send_event']);
-                }
-            }
-        }
+        $new_count = $this->count_scheduled_eventbridge_events();
 
         $this->assertGreaterThan($initial_count, $new_count, 'Async event should be scheduled');
     }

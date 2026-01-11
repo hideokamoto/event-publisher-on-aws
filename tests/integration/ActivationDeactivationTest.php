@@ -30,6 +30,25 @@ class ActivationDeactivationTest extends WP_UnitTestCase
     }
 
     /**
+     * Helper method to count scheduled eventbridge_async_send_event cron jobs
+     *
+     * @return int Number of scheduled events
+     */
+    private function count_scheduled_eventbridge_events()
+    {
+        $cron_array = _get_cron_array();
+        $count = 0;
+        if ($cron_array) {
+            foreach ($cron_array as $timestamp => $hooks) {
+                if (isset($hooks['eventbridge_async_send_event'])) {
+                    $count += count($hooks['eventbridge_async_send_event']);
+                }
+            }
+        }
+        return $count;
+    }
+
+    /**
      * Test plugin loads successfully
      */
     public function test_plugin_file_exists()
@@ -95,32 +114,14 @@ class ActivationDeactivationTest extends WP_UnitTestCase
         wp_schedule_single_event(time() + 7200, 'eventbridge_async_send_event', ['test2', 'test2', []]);
 
         // Verify events are scheduled
-        $cron_array = _get_cron_array();
-        $count_before = 0;
-        if ($cron_array) {
-            foreach ($cron_array as $timestamp => $hooks) {
-                if (isset($hooks['eventbridge_async_send_event'])) {
-                    $count_before += count($hooks['eventbridge_async_send_event']);
-                }
-            }
-        }
-
+        $count_before = $this->count_scheduled_eventbridge_events();
         $this->assertGreaterThan(0, $count_before, 'Events should be scheduled');
 
         // Simulate deactivation by clearing scheduled events
         wp_clear_scheduled_hook('eventbridge_async_send_event');
 
         // Verify events are cleared
-        $cron_array = _get_cron_array();
-        $count_after = 0;
-        if ($cron_array) {
-            foreach ($cron_array as $timestamp => $hooks) {
-                if (isset($hooks['eventbridge_async_send_event'])) {
-                    $count_after += count($hooks['eventbridge_async_send_event']);
-                }
-            }
-        }
-
+        $count_after = $this->count_scheduled_eventbridge_events();
         $this->assertEquals(0, $count_after, 'Scheduled events should be cleared');
     }
 
