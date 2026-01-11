@@ -15,12 +15,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php-version: ['7.4', '8.0', '8.1', '8.2']
-        wp-version: ['6.4', '6.5', '6.6', '6.7', 'latest']
-        exclude:
-          # Exclude PHP 7.4 with WP 6.7+ (requires PHP 7.2+, but works best with 8.0+)
-          - php-version: '7.4'
-            wp-version: '6.7'
+        php-version: ['8.1', '8.2', '8.3']
+        wp-version: ['6.5', '6.6', '6.7', 'latest']
 
     steps:
       - name: Checkout code

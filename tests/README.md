@@ -32,9 +32,10 @@ tests/
 
 ## Prerequisites
 
-1. **Node.js and npm** - For running wp-env
-2. **Docker** - wp-env uses Docker containers
-3. **Composer** - For installing PHP test dependencies (installed in container)
+1. **PHP 8.1 or higher** - Required for PHPUnit 10 and modern testing infrastructure
+2. **Node.js and npm** - For running wp-env
+3. **Docker** - wp-env uses Docker containers
+4. **Composer** - For installing PHP test dependencies (installed in container)
 
 ## Setup
 
@@ -148,8 +149,8 @@ This plugin uses **ONLY dev dependencies** (`require-dev` in composer.json):
 Tests run automatically on GitHub Actions for:
 - All pull requests
 - Pushes to `main` and `develop` branches
-- Multiple PHP versions: 7.4, 8.0, 8.1, 8.2
-- Multiple WordPress versions: 6.4, 6.5, 6.6, 6.7, latest
+- Multiple PHP versions: 8.1, 8.2, 8.3
+- Multiple WordPress versions: 6.5, 6.6, 6.7, latest
 
 See `.github/workflows/tests.yml` for the complete CI configuration.
 
