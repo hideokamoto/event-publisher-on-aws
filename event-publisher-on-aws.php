@@ -13,7 +13,7 @@ if (!defined('EVENTBRIDGE_POST_EVENTS_FILE')) {
     define('EVENTBRIDGE_POST_EVENTS_FILE', __FILE__);
 }
 
-// Note: EVENT_BUS_NAME, EVENT_SOURCE_NAME, and AWS_REGION_OVERRIDE can be defined in wp-config.php
+// Note: EVENT_BUS_NAME, EVENT_SOURCE_NAME, and EVENT_BRIDGE_REGION can be defined in wp-config.php
 // to override admin settings. When not defined, admin settings will be used.
 
 /**
@@ -925,7 +925,7 @@ class EventBridgePostEvents
         $constant_map = array(
             'event_bus_name' => 'EVENT_BUS_NAME',
             'event_source_name' => 'EVENT_SOURCE_NAME',
-            'aws_region_override' => 'AWS_REGION_OVERRIDE',
+            'aws_region_override' => 'EVENT_BRIDGE_REGION',
         );
 
         // Check for constant overrides first (highest priority)
@@ -1148,7 +1148,7 @@ class EventBridgePostEvents
 
         // Sanitize aws_region_override (preserve existing value if constant override is active and field is disabled)
         // Allow empty value to clear the override
-        if (defined('AWS_REGION_OVERRIDE') && !isset($input['aws_region_override'])) {
+        if (defined('EVENT_BRIDGE_REGION') && !isset($input['aws_region_override'])) {
             // Field was disabled due to constant override - preserve existing stored value
             $sanitized['aws_region_override'] = isset($this->settings['aws_region_override']) ? $this->settings['aws_region_override'] : $defaults['aws_region_override'];
         } else {
@@ -1218,7 +1218,7 @@ class EventBridgePostEvents
         <p><?php esc_html_e('Configure AWS EventBridge connection settings.', 'eventbridge-post-events'); ?></p>
         <p class="description">
             <strong><?php esc_html_e('Note:', 'eventbridge-post-events'); ?></strong>
-            <?php esc_html_e('These settings can be overridden by defining constants in wp-config.php (EVENT_BUS_NAME, EVENT_SOURCE_NAME, AWS_REGION_OVERRIDE). Constants take precedence over admin settings.', 'eventbridge-post-events'); ?>
+            <?php esc_html_e('These settings can be overridden by defining constants in wp-config.php (EVENT_BUS_NAME, EVENT_SOURCE_NAME, EVENT_BRIDGE_REGION). Constants take precedence over admin settings.', 'eventbridge-post-events'); ?>
         </p>
         <?php
     }
@@ -1284,7 +1284,7 @@ class EventBridgePostEvents
     {
         $value = $this->settings['aws_region_override'];
         $current_value = $this->get_setting('aws_region_override');
-        $is_constant_override = defined('AWS_REGION_OVERRIDE');
+        $is_constant_override = defined('EVENT_BRIDGE_REGION');
         $detected_region = $this->region;
         ?>
         <input type="text"
@@ -1295,7 +1295,7 @@ class EventBridgePostEvents
                <?php echo $is_constant_override ? 'disabled' : ''; ?>>
         <?php if ($is_constant_override): ?>
             <p class="description" style="color: #d63638;">
-                <strong><?php esc_html_e('Overridden by AWS_REGION_OVERRIDE constant:', 'eventbridge-post-events'); ?></strong>
+                <strong><?php esc_html_e('Overridden by EVENT_BRIDGE_REGION constant:', 'eventbridge-post-events'); ?></strong>
                 <code><?php echo esc_html($current_value); ?></code>
             </p>
         <?php else: ?>
@@ -1800,39 +1800,6 @@ class EventBridgePostEvents
                     return $cached;
                 }
                 // Credentials expire soon, delete cache and refresh
-                delete_transient(self::TRANSIENT_IMDS_CREDENTIALS);
-            } else {
-                return $cached;
-            }
-        }
-
-        // Check failure cache
-=======
-        return eventbridge_get_instance_identity_imdsv2(true);
-    }
-
-    /**
-     * EC2インスタンスロールから一時的な認証情報を取得する（IMDSv2対応、キャッシュ付き）
-     *
-     * 認証情報の有効期限を考慮してキャッシュします。
-     * 有効期限の5分前に新しい認証情報を取得します。
-     *
-     * @return array|null 認証情報配列（AccessKeyId, SecretAccessKey, Token, Expiration）、または取得失敗時はnull
-     */
-    private function get_instance_credentials()
-    {
-        // キャッシュをチェック
-        $cached = get_transient(self::TRANSIENT_IMDS_CREDENTIALS);
-        if ($cached !== false) {
-            // 有効期限の5分前かどうかをチェック
-            if (isset($cached['Expiration'])) {
-                $expiration = strtotime($cached['Expiration']);
-                $now = time();
-                // 有効期限の5分前より早ければキャッシュを使用
-                if ($expiration - $now > 300) {
-                    return $cached;
-                }
-                // 有効期限が近いのでキャッシュを削除して再取得
                 delete_transient(self::TRANSIENT_IMDS_CREDENTIALS);
             } else {
                 return $cached;
@@ -2588,12 +2555,12 @@ function eventbridge_post_events_activate()
     if (!empty($identity['region'])) {
         // Region detected successfully - log for confirmation
         error_log(sprintf('[EventBridge] Plugin activated. Region detected: %s', $identity['region']));
-    } elseif (!defined('AWS_EVENTBRIDGE_REGION') || empty(constant('AWS_EVENTBRIDGE_REGION'))) {
+    } elseif (!defined('EVENT_BRIDGE_REGION') || empty(constant('EVENT_BRIDGE_REGION'))) {
         // No region from IMDS and no fallback constant
-        $activation_warnings[] = 'AWS region could not be detected from EC2 instance metadata and AWS_EVENTBRIDGE_REGION is not defined. Please ensure the plugin is running on an EC2 instance or define AWS_EVENTBRIDGE_REGION in wp-config.php.';
+        $activation_warnings[] = 'AWS region could not be detected from EC2 instance metadata and EVENT_BRIDGE_REGION is not defined. Please ensure the plugin is running on an EC2 instance or define EVENT_BRIDGE_REGION in wp-config.php.';
     } else {
         // Using fallback region from constant
-        error_log(sprintf('[EventBridge] Plugin activated. Using fallback region from constant: %s', constant('AWS_EVENTBRIDGE_REGION')));
+        error_log(sprintf('[EventBridge] Plugin activated. Using fallback region from constant: %s', constant('EVENT_BRIDGE_REGION')));
     }
 
     // Store activation errors/warnings for display
@@ -2610,7 +2577,7 @@ function eventbridge_post_events_activate()
             'Add to wp-config.php:</p>' .
             '<pre>define(\'AWS_EVENTBRIDGE_ACCESS_KEY_ID\', \'your-access-key-id\');<br>' .
             'define(\'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY\', \'your-secret-access-key\');<br>' .
-            'define(\'AWS_EVENTBRIDGE_REGION\', \'us-east-1\'); // Optional if not on EC2</pre>' .
+            'define(\'EVENT_BRIDGE_REGION\', \'us-east-1\'); // Optional if not on EC2</pre>' .
             '<p><strong>Option 2: EC2 Instance Role (Recommended)</strong><br>' .
             'Attach an IAM role to your EC2 instance with the following policy:</p>' .
             '<pre>{\n' .
