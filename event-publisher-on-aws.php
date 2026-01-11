@@ -564,8 +564,7 @@ class EventBridgePostEvents
     private $transient_failures = 0;
     private $permanent_failures = 0;
 
-    // Credential source tracking for admin notices
-    private $credential_source = null;
+    // Region source tracking for admin notices
     private $region_source = null;
 
     // WordPress options keys for persistent storage (non-autoload for performance)
