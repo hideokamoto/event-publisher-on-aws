@@ -1122,9 +1122,9 @@ class EventBridgePostEvents
             $sanitized['event_bus_name'] = $this->sanitize_and_validate_setting(
                 $input,
                 'event_bus_name',
-                '/^([a-zA-Z0-9._\-]{1,256}|arn:aws:events:[a-z]{2}-[a-z]+-\d{1}:\d{12}:event-bus\/[a-zA-Z0-9._\-\/]{1,256})$/',
+                '/^([a-zA-Z0-9._\-]{1,256}|arn:aws:events:[a-z]{2,3}(-[a-z]+)+-\d+:\d{12}:event-bus\/[a-zA-Z0-9._\-\/]{1,256})$/',
                 'invalid_event_bus_name',
-                __('Event Bus Name must be a valid name (alphanumeric, hyphens, underscores, dots; max 256 chars) or a valid ARN (e.g., arn:aws:events:us-east-1:123456789012:event-bus/my-bus).', 'eventbridge-post-events'),
+                __('Event Bus Name must be a valid name (alphanumeric, hyphens, underscores, dots; max 256 chars) or a valid ARN (e.g., arn:aws:events:us-east-1:123456789012:event-bus/my-bus, arn:aws:events:us-gov-west-1:123456789012:event-bus/my-bus).', 'eventbridge-post-events'),
                 $defaults['event_bus_name']
             );
         }
@@ -1154,9 +1154,9 @@ class EventBridgePostEvents
             $sanitized['aws_region_override'] = $this->sanitize_and_validate_setting(
                 $input,
                 'aws_region_override',
-                '/^[a-z]{2}-[a-z]+-\d{1}$/',
+                EventBridgePutEvents::REGION_FORMAT_REGEX,
                 'invalid_aws_region',
-                __('AWS Region Override must be in valid format (e.g., us-east-1, ap-northeast-1).', 'eventbridge-post-events'),
+                __('AWS Region Override must be in valid format (e.g., us-east-1, ap-northeast-1, us-gov-west-1).', 'eventbridge-post-events'),
                 $defaults['aws_region_override']
             );
         }
