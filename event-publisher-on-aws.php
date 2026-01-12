@@ -13,7 +13,7 @@ if (!defined('EVENTBRIDGE_POST_EVENTS_FILE')) {
     define('EVENTBRIDGE_POST_EVENTS_FILE', __FILE__);
 }
 
-// Note: EVENT_BUS_NAME, EVENT_SOURCE_NAME, and AWS_REGION_OVERRIDE can be defined in wp-config.php
+// Note: EVENT_BUS_NAME, EVENT_SOURCE_NAME, and EVENT_BRIDGE_REGION can be defined in wp-config.php
 // to override admin settings. When not defined, admin settings will be used.
 
 /**
@@ -133,6 +133,10 @@ function eventbridge_check_instance_role_credentials()
 
 class EventBridgePutEvents
 {
+    // AWS region format validation pattern
+    // Supports standard regions (us-east-1) and GovCloud regions (us-gov-west-1)
+    const REGION_FORMAT_REGEX = '/^[a-z]{2,3}(-[a-z]+)+-\d+$/';
+
     private $accessKeyId;
     private $secretAccessKey;
     private $sessionToken;
@@ -143,6 +147,16 @@ class EventBridgePutEvents
 
     public function __construct($accessKeyId, $secretAccessKey, $region, $sessionToken = null, $eventBusName = 'default')
     {
+        // Validate credential parameters
+        if (empty($accessKeyId) || empty($secretAccessKey)) {
+            throw new Exception('EventBridgePutEvents: Access key ID and secret access key cannot be empty');
+        }
+
+        // Validate region format (supports standard and GovCloud regions)
+        if (empty($region) || !preg_match(self::REGION_FORMAT_REGEX, $region)) {
+            throw new Exception(sprintf('EventBridgePutEvents: Invalid AWS region format: %s', $region));
+        }
+
         $this->accessKeyId = $accessKeyId;
         $this->secretAccessKey = $secretAccessKey;
         $this->sessionToken = $sessionToken;
@@ -202,7 +216,7 @@ class EventBridgePutEvents
         $amzDate = $now->format('Ymd\THis\Z');
         $dateStamp = $now->format('Ymd');
 
-        // SessionTokenがある場合は署名対象のヘッダーに含める
+        // Include session token in signature if present (for temporary credentials)
         if (!empty($this->sessionToken)) {
             $canonicalHeaders = "content-type:application/x-amz-json-1.1\nhost:{$this->endpoint}\nx-amz-date:{$amzDate}\nx-amz-security-token:{$this->sessionToken}\nx-amz-target:AWSEvents.PutEvents\n";
             $signedHeaders = 'content-type;host;x-amz-date;x-amz-security-token;x-amz-target';
@@ -230,6 +244,9 @@ class EventBridgePutEvents
         $signingKey = $this->getSignatureKey($dateStamp);
         $signature = hash_hmac('sha256', $stringToSign, $signingKey);
 
+        // Clear signing key from memory after use
+        $signingKey = null;
+
         $authorizationHeader = "AWS4-HMAC-SHA256 Credential={$this->accessKeyId}/{$dateStamp}/{$this->region}/{$this->serviceName}/aws4_request, SignedHeaders={$signedHeaders}, Signature={$signature}";
 
         $headers = array(
@@ -239,7 +256,7 @@ class EventBridgePutEvents
             'Authorization' => $authorizationHeader,
         );
 
-        // SessionTokenがある場合はヘッダーに追加
+        // Add session token to headers if present (for temporary credentials)
         if (!empty($this->sessionToken)) {
             $headers['X-Amz-Security-Token'] = $this->sessionToken;
         }
@@ -254,8 +271,8 @@ class EventBridgePutEvents
         // Check if verbose logging is enabled (DRY principle)
         $verboseLogging = defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG;
 
-        // Extract post ID from detail if available
-        $postId = isset($detail['id']) ? $detail['id'] : 'N/A';
+        // Extract post ID from detail if available (handle both legacy and envelope formats)
+        $postId = $detail['id'] ?? ($detail['data']['id'] ?? 'N/A');
 
         // Retry loop with exponential backoff
         for ($attempt = 0; $attempt <= $maxRetries; $attempt++) {
@@ -499,10 +516,33 @@ class EventBridgePutEvents
     private function getSignatureKey($dateStamp)
     {
         $kSecret = 'AWS4' . $this->secretAccessKey;
+
+        // Validate hash_hmac operations
         $kDate = hash_hmac('sha256', $dateStamp, $kSecret, true);
+        if ($kDate === false) {
+            throw new Exception('Failed to generate date key in signature derivation');
+        }
+
         $kRegion = hash_hmac('sha256', $this->region, $kDate, true);
+        if ($kRegion === false) {
+            throw new Exception('Failed to generate region key in signature derivation');
+        }
+
         $kService = hash_hmac('sha256', $this->serviceName, $kRegion, true);
+        if ($kService === false) {
+            throw new Exception('Failed to generate service key in signature derivation');
+        }
+
         $kSigning = hash_hmac('sha256', 'aws4_request', $kService, true);
+        if ($kSigning === false) {
+            throw new Exception('Failed to generate signing key in signature derivation');
+        }
+
+        // Clear intermediate sensitive values from memory
+        $kSecret = null;
+        $kDate = null;
+        $kRegion = null;
+        $kService = null;
 
         return $kSigning;
     }
@@ -524,6 +564,9 @@ class EventBridgePostEvents
     private $transient_failures = 0;
     private $permanent_failures = 0;
 
+    // Region source tracking for admin notices
+    private $region_source = null;
+
     // WordPress options keys for persistent storage (non-autoload for performance)
     const OPTION_METRICS = 'eventbridge_metrics';
     const OPTION_FAILURE_DETAILS = 'eventbridge_failure_details';
@@ -532,15 +575,21 @@ class EventBridgePostEvents
     const FAILURE_THRESHOLD = 5; // Number of failures before showing admin notice
 
     // IMDS cache transient keys
+    const TRANSIENT_IMDS_TOKEN = 'eventbridge_imds_token';
     const TRANSIENT_IMDS_IDENTITY = 'eventbridge_imds_identity';
     const TRANSIENT_IMDS_CREDENTIALS = 'eventbridge_imds_credentials';
     const TRANSIENT_IMDS_FAILED = 'eventbridge_imds_failed';
+    const TRANSIENT_CACHED_REGION = 'eventbridge_cached_region';
 
     // IMDS configuration
     const IMDS_BASE_URL = 'http://169.254.169.254';
     const IMDS_TIMEOUT = 2;
+
+    // IMDS cache durations
+    const IMDS_TOKEN_CACHE_DURATION = 21000; // 5h50m (10 min before 6h expiry for safety)
     const IMDS_IDENTITY_CACHE_DURATION = 3600; // 1 hour for successful lookups
     const IMDS_FAILED_CACHE_DURATION = 300;    // 5 minutes for failed lookups
+    const REGION_CACHE_DURATION = 86400;       // 24 hours for cached region from IMDS
 
     // Valid setting values
     const VALID_EVENT_FORMATS = array('legacy', 'envelope');
@@ -548,6 +597,188 @@ class EventBridgePostEvents
 
     // Settings defaults
     private $settings;
+
+    /**
+     * Get AWS credentials from environment variables, WordPress constants, or EC2 instance role
+     * Resolution order: environment variables → WordPress constants → EC2 instance role → null
+     *
+     * @return array|null Array with 'access_key_id', 'secret_access_key', 'session_token' (optional), and 'source', or null if not available
+     */
+    private function get_aws_credentials()
+    {
+        // Check environment variables (getenv, $_ENV, $_SERVER)
+        $env_access_key = $this->get_env_var('AWS_ACCESS_KEY_ID');
+        $env_secret_key = $this->get_env_var('AWS_SECRET_ACCESS_KEY');
+        $env_session_token = $this->get_env_var('AWS_SESSION_TOKEN');
+
+        if (!empty($env_access_key) && !empty($env_secret_key)) {
+            $credentials = array(
+                'access_key_id' => $env_access_key,
+                'secret_access_key' => $env_secret_key,
+                'source' => 'environment'
+            );
+
+            // Include session token if present (for temporary credentials)
+            if (!empty($env_session_token)) {
+                $credentials['session_token'] = $env_session_token;
+            }
+
+            return $credentials;
+        }
+
+        // Fallback to WordPress constants
+        if (defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') && defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY')) {
+            $const_access_key = constant('AWS_EVENTBRIDGE_ACCESS_KEY_ID');
+            $const_secret_key = constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY');
+
+            if (!empty($const_access_key) && !empty($const_secret_key)) {
+                return array(
+                    'access_key_id' => $const_access_key,
+                    'secret_access_key' => $const_secret_key,
+                    'source' => 'constants'
+                );
+            }
+        }
+
+        // Fallback to EC2 instance role credentials
+        $instance_creds = $this->get_instance_credentials();
+        if ($instance_creds !== null) {
+            return array(
+                'access_key_id' => $instance_creds['AccessKeyId'],
+                'secret_access_key' => $instance_creds['SecretAccessKey'],
+                'session_token' => $instance_creds['Token'],
+                'source' => 'instance_role'
+            );
+        }
+
+        return null;
+    }
+
+    /**
+     * Get environment variable from getenv(), $_ENV, or $_SERVER
+     * Handles cases where getenv() is disabled
+     *
+     * @param string $name Environment variable name
+     * @return string|false Environment variable value or false if not found
+     */
+    private function get_env_var($name)
+    {
+        // Try getenv() first
+        $value = getenv($name);
+        if ($value !== false && $value !== '') {
+            return $value;
+        }
+
+        // Fallback to $_ENV
+        if (isset($_ENV[$name]) && $_ENV[$name] !== '') {
+            return $_ENV[$name];
+        }
+
+        // Fallback to $_SERVER
+        if (isset($_SERVER[$name]) && $_SERVER[$name] !== '') {
+            return $_SERVER[$name];
+        }
+
+        return false;
+    }
+
+    /**
+     * Validate and detect AWS region
+     * Resolution order: EVENT_BRIDGE_REGION constant → cached region → EC2 metadata → 'us-east-1' default
+     *
+     * IMDS is only attempted in admin or wp-cron contexts. The detected region is cached for 24 hours
+     * so frontend requests can use the cached value instead of falling back to 'us-east-1'.
+     *
+     * @return array Array with 'region' and 'source'
+     */
+    private function get_aws_region()
+    {
+        // Try EVENT_BRIDGE_REGION constant first (highest priority)
+        if (defined('EVENT_BRIDGE_REGION')) {
+            $region = constant('EVENT_BRIDGE_REGION');
+            if ($this->validate_region_format($region)) {
+                return array(
+                    'region' => $region,
+                    'source' => 'constant'
+                );
+            } else {
+                error_log(sprintf(
+                    '[EventBridge] EVENT_BRIDGE_REGION constant has invalid format: %s',
+                    $region
+                ));
+            }
+        }
+
+        // Check cached region (from previous IMDS detection in admin/cron)
+        $cached_region_data = get_transient(self::TRANSIENT_CACHED_REGION);
+        if ($cached_region_data !== false && is_array($cached_region_data)) {
+            if (isset($cached_region_data['region']) && $this->validate_region_format($cached_region_data['region'])) {
+                return array(
+                    'region' => $cached_region_data['region'],
+                    'source' => $cached_region_data['source'] . '_cached'
+                );
+            } else {
+                // Invalid cached region, delete it
+                delete_transient(self::TRANSIENT_CACHED_REGION);
+            }
+        }
+
+        // Only try IMDS in admin or wp-cron contexts to avoid frontend performance impact
+        $should_try_imds = is_admin() || (defined('DOING_CRON') && DOING_CRON);
+
+        if ($should_try_imds) {
+            // Try EC2 instance metadata
+            $identity = $this->get_instance_identity();
+            if (isset($identity['region']) && !empty($identity['region'])) {
+                $region = $identity['region'];
+                if ($this->validate_region_format($region)) {
+                    $region_data = array(
+                        'region' => $region,
+                        'source' => 'metadata'
+                    );
+
+                    // Cache the detected region for 24 hours so frontend can use it
+                    set_transient(self::TRANSIENT_CACHED_REGION, $region_data, self::REGION_CACHE_DURATION);
+
+                    return $region_data;
+                } else {
+                    error_log(sprintf(
+                        '[EventBridge] Region from metadata has invalid format: %s',
+                        $region
+                    ));
+                    // Delete any stale cache since detection returned invalid format
+                    delete_transient(self::TRANSIENT_CACHED_REGION);
+                }
+            } else {
+                // IMDS detection failed or returned empty, delete stale cache
+                delete_transient(self::TRANSIENT_CACHED_REGION);
+            }
+        }
+
+        // Fallback to us-east-1
+        if (!$should_try_imds) {
+            error_log('[EventBridge] Frontend request: Using fallback region us-east-1 (no cached region available)');
+        } else {
+            error_log('[EventBridge] IMDS detection failed: Using fallback region us-east-1');
+        }
+        return array(
+            'region' => 'us-east-1',
+            'source' => 'fallback'
+        );
+    }
+
+    /**
+     * Validate AWS region format using regex pattern
+     *
+     * @param string $region Region string to validate
+     * @return bool True if valid, false otherwise
+     */
+    private function validate_region_format($region)
+    {
+        // AWS region format: 2-3 letter prefix, dash, geographic area, dash, number
+        // Examples: us-east-1, eu-west-2, ap-southeast-1, us-gov-west-1
+        return preg_match(EventBridgePutEvents::REGION_FORMAT_REGEX, $region) === 1;
+    }
 
     public function __construct()
     {
@@ -559,63 +790,31 @@ class EventBridgePostEvents
         add_action('admin_init', array($this, 'register_settings'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_styles'));
 
-        $access_key = null;
-        $secret_key = null;
-        $session_token = null;
-
-        // 認証情報の取得: 1. 定数から、2. インスタンスロールから
-        if (defined('AWS_EVENTBRIDGE_ACCESS_KEY_ID') &&
-            defined('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY') &&
-            !empty(AWS_EVENTBRIDGE_ACCESS_KEY_ID) &&
-            !empty(AWS_EVENTBRIDGE_SECRET_ACCESS_KEY)) {
-            // 定数から静的認証情報を取得
-            $access_key = AWS_EVENTBRIDGE_ACCESS_KEY_ID;
-            $secret_key = AWS_EVENTBRIDGE_SECRET_ACCESS_KEY;
-            $this->credential_source = 'Constants (wp-config.php)';
-        } else {
-            // 定数が未定義の場合、EC2インスタンスロールから取得
-            $instance_creds = $this->get_instance_credentials();
-            if ($instance_creds !== null) {
-                $access_key = $instance_creds['AccessKeyId'];
-                $secret_key = $instance_creds['SecretAccessKey'];
-                $session_token = $instance_creds['Token'];
-                $this->credential_source = 'IAM Role (IMDS)';
-            }
-        }
-
-        // 認証情報が取得できない場合のみエラー
-        if (empty($access_key) || empty($secret_key)) {
+        // Get AWS credentials using resolution order: env vars → constants → instance role
+        $credentials = $this->get_aws_credentials();
+        if ($credentials === null) {
             add_action('admin_notices', function() {
                 ?>
                 <div class="notice notice-error">
-                    <p><?php esc_html_e('EventBridge Post Events: AWS認証情報が設定されていません。wp-config.phpで定数を定義するか、EC2インスタンスロールを設定してください。', 'eventbridge-post-events'); ?></p>
+                    <p><?php esc_html_e('EventBridge Post Events: AWS credentials are not configured. Please set environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY), wp-config.php constants (AWS_EVENTBRIDGE_ACCESS_KEY_ID, AWS_EVENTBRIDGE_SECRET_ACCESS_KEY), or EC2 instance role.', 'eventbridge-post-events'); ?></p>
                 </div>
                 <?php
             });
             return;
         }
 
-        // リージョンの取得（EC2インスタンスメタデータ、または定数からのフォールバック）
-        $identity = $this->get_instance_identity();
-        if (!empty($identity['region'])) {
-            $this->region = $identity['region'];
-        } elseif (defined('AWS_EVENTBRIDGE_REGION') && !empty(AWS_EVENTBRIDGE_REGION)) {
-            $this->region = AWS_EVENTBRIDGE_REGION;
-        } else {
-            add_action('admin_notices', function() {
-                ?>
-                <div class="notice notice-error">
-                    <p><?php esc_html_e('EventBridge Post Events: AWSリージョンを特定できません。EC2以外の環境では、wp-config.phpでAWS_EVENTBRIDGE_REGION定数を定義してください。', 'eventbridge-post-events'); ?></p>
-                </div>
-                <?php
-            });
-            return;
-        }
+        // Store credential source
+        $this->credential_source = $credentials['source'];
+
+        // Get region using resolution order: constant → metadata → fallback
+        $region_info = $this->get_aws_region();
+        $this->region = $region_info['region'];
+        $this->region_source = $region_info['source'];
 
         // Store credentials for lazy client initialization
-        $this->access_key = $access_key;
-        $this->secret_key = $secret_key;
-        $this->session_token = $session_token;
+        $this->access_key = $credentials['access_key_id'];
+        $this->secret_key = $credentials['secret_access_key'];
+        $this->session_token = isset($credentials['session_token']) ? $credentials['session_token'] : null;
         // Note: Client will be initialized after settings are loaded to get event_bus_name
         $this->client = null;
 
@@ -636,6 +835,9 @@ class EventBridgePostEvents
 
         // Admin notice for failures
         add_action('admin_notices', array($this, 'display_failure_notice'));
+
+        // Admin notice for credential source and region fallback
+        add_action('admin_notices', array($this, 'display_config_notice'));
 
         // Handle notice dismissal
         add_action('admin_init', array($this, 'handle_notice_dismissal'));
@@ -722,7 +924,7 @@ class EventBridgePostEvents
         $constant_map = array(
             'event_bus_name' => 'EVENT_BUS_NAME',
             'event_source_name' => 'EVENT_SOURCE_NAME',
-            'aws_region_override' => 'AWS_REGION_OVERRIDE',
+            'aws_region_override' => 'EVENT_BRIDGE_REGION',
         );
 
         // Check for constant overrides first (highest priority)
@@ -920,9 +1122,9 @@ class EventBridgePostEvents
             $sanitized['event_bus_name'] = $this->sanitize_and_validate_setting(
                 $input,
                 'event_bus_name',
-                '/^([a-zA-Z0-9._\-]{1,256}|arn:aws:events:[a-z]{2}-[a-z]+-\d{1}:\d{12}:event-bus\/[a-zA-Z0-9._\-\/]{1,256})$/',
+                '/^([a-zA-Z0-9._\-]{1,256}|arn:aws:events:[a-z]{2,3}(-[a-z]+)+-\d+:\d{12}:event-bus\/[a-zA-Z0-9._\-\/]{1,256})$/',
                 'invalid_event_bus_name',
-                __('Event Bus Name must be a valid name (alphanumeric, hyphens, underscores, dots; max 256 chars) or a valid ARN (e.g., arn:aws:events:us-east-1:123456789012:event-bus/my-bus).', 'eventbridge-post-events'),
+                __('Event Bus Name must be a valid name (alphanumeric, hyphens, underscores, dots; max 256 chars) or a valid ARN (e.g., arn:aws:events:us-east-1:123456789012:event-bus/my-bus, arn:aws:events:us-gov-west-1:123456789012:event-bus/my-bus).', 'eventbridge-post-events'),
                 $defaults['event_bus_name']
             );
         }
@@ -945,16 +1147,16 @@ class EventBridgePostEvents
 
         // Sanitize aws_region_override (preserve existing value if constant override is active and field is disabled)
         // Allow empty value to clear the override
-        if (defined('AWS_REGION_OVERRIDE') && !isset($input['aws_region_override'])) {
+        if (defined('EVENT_BRIDGE_REGION') && !isset($input['aws_region_override'])) {
             // Field was disabled due to constant override - preserve existing stored value
             $sanitized['aws_region_override'] = isset($this->settings['aws_region_override']) ? $this->settings['aws_region_override'] : $defaults['aws_region_override'];
         } else {
             $sanitized['aws_region_override'] = $this->sanitize_and_validate_setting(
                 $input,
                 'aws_region_override',
-                '/^[a-z]{2}-[a-z]+-\d{1}$/',
+                EventBridgePutEvents::REGION_FORMAT_REGEX,
                 'invalid_aws_region',
-                __('AWS Region Override must be in valid format (e.g., us-east-1, ap-northeast-1).', 'eventbridge-post-events'),
+                __('AWS Region Override must be in valid format (e.g., us-east-1, ap-northeast-1, us-gov-west-1).', 'eventbridge-post-events'),
                 $defaults['aws_region_override']
             );
         }
@@ -1015,7 +1217,7 @@ class EventBridgePostEvents
         <p><?php esc_html_e('Configure AWS EventBridge connection settings.', 'eventbridge-post-events'); ?></p>
         <p class="description">
             <strong><?php esc_html_e('Note:', 'eventbridge-post-events'); ?></strong>
-            <?php esc_html_e('These settings can be overridden by defining constants in wp-config.php (EVENT_BUS_NAME, EVENT_SOURCE_NAME, AWS_REGION_OVERRIDE). Constants take precedence over admin settings.', 'eventbridge-post-events'); ?>
+            <?php esc_html_e('These settings can be overridden by defining constants in wp-config.php (EVENT_BUS_NAME, EVENT_SOURCE_NAME, EVENT_BRIDGE_REGION). Constants take precedence over admin settings.', 'eventbridge-post-events'); ?>
         </p>
         <?php
     }
@@ -1081,7 +1283,7 @@ class EventBridgePostEvents
     {
         $value = $this->settings['aws_region_override'];
         $current_value = $this->get_setting('aws_region_override');
-        $is_constant_override = defined('AWS_REGION_OVERRIDE');
+        $is_constant_override = defined('EVENT_BRIDGE_REGION');
         $detected_region = $this->region;
         ?>
         <input type="text"
@@ -1092,7 +1294,7 @@ class EventBridgePostEvents
                <?php echo $is_constant_override ? 'disabled' : ''; ?>>
         <?php if ($is_constant_override): ?>
             <p class="description" style="color: #d63638;">
-                <strong><?php esc_html_e('Overridden by AWS_REGION_OVERRIDE constant:', 'eventbridge-post-events'); ?></strong>
+                <strong><?php esc_html_e('Overridden by EVENT_BRIDGE_REGION constant:', 'eventbridge-post-events'); ?></strong>
                 <code><?php echo esc_html($current_value); ?></code>
             </p>
         <?php else: ?>
@@ -1446,60 +1648,176 @@ class EventBridgePostEvents
     }
 
     /**
-     * インスタンスメタデータから識別情報を取得する（IMDSv2対応、キャッシュ付き）
+     * Retrieve IMDSv2 token with persistent transient caching
+     * Token has 6-hour TTL, cached for 5h50m to ensure fresh token
      *
-     * IMDSv2はトークンベース認証を使用し、SSRF攻撃に対してより安全です。
-     * 結果はWordPress transientにキャッシュされ、毎ページロードでのHTTPリクエストを回避します。
-     * EC2以外の環境では空配列を返します。
+     * @return string|null IMDSv2 token or null on failure
+     */
+    private function get_imdsv2_token()
+    {
+        // Check transient cache first (persists across requests)
+        $cached_token = get_transient(self::TRANSIENT_IMDS_TOKEN);
+        if ($cached_token !== false && !empty($cached_token)) {
+            return $cached_token;
+        }
+
+        // Request new token with 6-hour TTL (21600 seconds)
+        $response = wp_remote_request(self::IMDS_BASE_URL . '/latest/api/token', array(
+            'method' => 'PUT',
+            'headers' => array(
+                'X-aws-ec2-metadata-token-ttl-seconds' => '21600'
+            ),
+            'timeout' => self::IMDS_TIMEOUT
+        ));
+
+        if (is_wp_error($response)) {
+            error_log(sprintf(
+                '[EventBridge] IMDSv2 token retrieval failed: %s',
+                $response->get_error_message()
+            ));
+            return null;
+        }
+
+        $status_code = wp_remote_retrieve_response_code($response);
+        if ($status_code !== 200) {
+            error_log(sprintf(
+                '[EventBridge] IMDSv2 token retrieval returned HTTP %d',
+                $status_code
+            ));
+            return null;
+        }
+
+        $token = wp_remote_retrieve_body($response);
+        if (empty($token)) {
+            error_log('[EventBridge] IMDSv2 token is empty');
+            return null;
+        }
+
+        // Cache token in transient for 5h50m (safe margin before 6h expiry)
+        set_transient(self::TRANSIENT_IMDS_TOKEN, $token, self::IMDS_TOKEN_CACHE_DURATION);
+
+        return $token;
+    }
+
+    /**
+     * Get EC2 instance identity from metadata (IMDSv2 with transient caching)
+     *
+     * Uses persistent caching to avoid repeated timeouts on non-EC2 hosts.
+     * Caches both successful results (1 hour) and failures (5 minutes).
+     * Returns empty array on non-EC2 environments.
      *
      * @return array インスタンス識別情報
      */
     private function get_instance_identity()
     {
-        return eventbridge_get_instance_identity_imdsv2(true);
+        // Check success cache first (persists across requests)
+        $cached = get_transient(self::TRANSIENT_IMDS_IDENTITY);
+        if ($cached !== false) {
+            return $cached;
+        }
+
+        // Check failure cache to avoid repeated timeouts (short-circuit for non-EC2)
+        if (get_transient(self::TRANSIENT_IMDS_FAILED) !== false) {
+            return array();
+        }
+
+        // Try to get IMDSv2 token
+        $token = $this->get_imdsv2_token();
+        if ($token === null) {
+            // Cache failure for 5 minutes to prevent repeated timeout attempts
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return array();
+        }
+
+        // Request instance identity document with IMDSv2 token
+        $response = wp_remote_get(self::IMDS_BASE_URL . '/latest/dynamic/instance-identity/document', array(
+            'headers' => array(
+                'X-aws-ec2-metadata-token' => $token
+            ),
+            'timeout' => self::IMDS_TIMEOUT
+        ));
+
+        if (is_wp_error($response)) {
+            error_log(sprintf(
+                '[EventBridge] Instance identity retrieval failed: %s',
+                $response->get_error_message()
+            ));
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return array();
+        }
+
+        $status_code = wp_remote_retrieve_response_code($response);
+        if ($status_code !== 200) {
+            error_log(sprintf(
+                '[EventBridge] Instance identity returned HTTP %d',
+                $status_code
+            ));
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return array();
+        }
+
+        $body = wp_remote_retrieve_body($response);
+        $identity = json_decode($body, true);
+
+        // Validate that identity is a valid array and region is not null/empty
+        if (!is_array($identity) || json_last_error() !== JSON_ERROR_NONE) {
+            error_log('[EventBridge] Instance identity document has invalid JSON');
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return array();
+        }
+
+        // Cache successful result for 1 hour
+        set_transient(self::TRANSIENT_IMDS_IDENTITY, $identity, self::IMDS_IDENTITY_CACHE_DURATION);
+        return $identity;
     }
 
     /**
-     * EC2インスタンスロールから一時的な認証情報を取得する（IMDSv2対応、キャッシュ付き）
+     * EC2インスタンスロールから一時的な認証情報を取得する (IMDSv2 with smart caching)
      *
-     * 認証情報の有効期限を考慮してキャッシュします。
-     * 有効期限の5分前に新しい認証情報を取得します。
+     * Retrieves temporary credentials with expiration-aware caching.
+     * Only attempts IMDS in admin or wp-cron contexts to avoid frontend performance impact.
      *
-     * @return array|null 認証情報配列（AccessKeyId, SecretAccessKey, Token, Expiration）、または取得失敗時はnull
+     * @return array|null Array with AccessKeyId, SecretAccessKey, Token, Expiration or null on failure
      */
     private function get_instance_credentials()
     {
-        // キャッシュをチェック
+        // Only try instance credentials in admin or wp-cron contexts
+        $should_try_imds = is_admin() || (defined('DOING_CRON') && DOING_CRON);
+        if (!$should_try_imds) {
+            return null;
+        }
+
+        // Check cached credentials
         $cached = get_transient(self::TRANSIENT_IMDS_CREDENTIALS);
         if ($cached !== false) {
-            // 有効期限の5分前かどうかをチェック
+            // Check if expiration is approaching (within 5 minutes)
             if (isset($cached['Expiration'])) {
                 $expiration = strtotime($cached['Expiration']);
                 $now = time();
-                // 有効期限の5分前より早ければキャッシュを使用
+                // Use cached credentials if more than 5 minutes until expiry
                 if ($expiration - $now > 300) {
                     return $cached;
                 }
-                // 有効期限が近いのでキャッシュを削除して再取得
+                // Credentials expire soon, delete cache and refresh
                 delete_transient(self::TRANSIENT_IMDS_CREDENTIALS);
             } else {
                 return $cached;
             }
         }
 
-        // 失敗キャッシュをチェック
+        // Check failure cache
         if (get_transient(self::TRANSIENT_IMDS_FAILED) !== false) {
             return null;
         }
 
-        // IMDSv2トークンを取得
-        $token = eventbridge_get_imds_token();
+        // Get IMDSv2 token
+        $token = $this->get_imdsv2_token();
         if ($token === null) {
             set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return null;
         }
 
-        // IAMロール名を取得
+        // Get IAM role name
         $role_response = wp_remote_get(self::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/', array(
             'headers' => array('X-aws-ec2-metadata-token' => $token),
             'timeout' => self::IMDS_TIMEOUT,
@@ -1516,7 +1834,7 @@ class EventBridgePostEvents
             return null;
         }
 
-        // 認証情報を取得
+        // Get credentials for the role
         $creds_response = wp_remote_get(self::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/' . $role_name, array(
             'headers' => array('X-aws-ec2-metadata-token' => $token),
             'timeout' => self::IMDS_TIMEOUT,
@@ -1529,6 +1847,7 @@ class EventBridgePostEvents
 
         $creds = json_decode(wp_remote_retrieve_body($creds_response), true);
 
+        // Validate credentials
         if (json_last_error() !== JSON_ERROR_NONE ||
             empty($creds['AccessKeyId']) ||
             empty($creds['SecretAccessKey']) ||
@@ -1544,12 +1863,12 @@ class EventBridgePostEvents
             'Expiration' => isset($creds['Expiration']) ? $creds['Expiration'] : null,
         );
 
-        // 有効期限に基づいてキャッシュ期間を計算（有効期限の5分前まで）
+        // Calculate cache duration based on expiration (5 min safety margin)
         $cache_duration = self::IMDS_IDENTITY_CACHE_DURATION;
         if (isset($creds['Expiration'])) {
             $expiration = strtotime($creds['Expiration']);
             $now = time();
-            $time_until_expiry = $expiration - $now - 300; // 5分のマージン
+            $time_until_expiry = $expiration - $now - 300; // 5 min margin
             if ($time_until_expiry > 0) {
                 $cache_duration = min($cache_duration, $time_until_expiry);
             }
@@ -1862,7 +2181,8 @@ class EventBridgePostEvents
      */
     public function handle_send_failure($source, $detailType, $detail)
     {
-        $postId = isset($detail['id']) ? $detail['id'] : null;
+        // Extract post ID from detail (handle both legacy and envelope formats)
+        $postId = $detail['id'] ?? ($detail['data']['id'] ?? null);
         if ($postId) {
             // 失敗イベントをログに記録（監視・アラート用）
             error_log(sprintf(
@@ -1890,6 +2210,58 @@ class EventBridgePostEvents
 
         // 非同期でEventBridgeに送信（UIをブロックしない）
         wp_schedule_single_event(time(), 'eventbridge_async_send_event', array($this->get_setting('event_source_name'), $event_name, $event_data));
+    }
+
+    /**
+     * Display admin notice for credential source and region fallback
+     */
+    public function display_config_notice()
+    {
+        // Only show to administrators
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        // Only show on admin pages
+        if (!is_admin()) {
+            return;
+        }
+
+        $messages = array();
+
+        // Notice for environment variable credentials
+        if ($this->credential_source === 'environment') {
+            $messages[] = sprintf(
+                '<strong>%s</strong> %s',
+                esc_html__('認証情報ソース:', 'eventbridge-post-events'),
+                esc_html__('環境変数 (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)', 'eventbridge-post-events')
+            );
+        }
+
+        // Notice for region fallback
+        if ($this->region_source === 'fallback') {
+            $messages[] = sprintf(
+                '<strong>%s</strong> %s',
+                esc_html__('リージョン検出警告:', 'eventbridge-post-events'),
+                sprintf(
+                    esc_html__('EVENT_BRIDGE_REGION定数とEC2メタデータからリージョンを検出できませんでした。デフォルトの「%s」を使用します。', 'eventbridge-post-events'),
+                    esc_html($this->region)
+                )
+            );
+        }
+
+        if (!empty($messages)) {
+            ?>
+            <div class="notice notice-info">
+                <p><strong><?php esc_html_e('EventBridge Post Events 設定情報', 'eventbridge-post-events'); ?></strong></p>
+                <ul style="list-style: disc; margin-left: 20px;">
+                    <?php foreach ($messages as $message): ?>
+                        <li><?php echo wp_kses_post($message); ?></li>
+                    <?php endforeach; ?>
+                </ul>
+            </div>
+            <?php
+        }
     }
 
     /**
@@ -2182,12 +2554,12 @@ function eventbridge_post_events_activate()
     if (!empty($identity['region'])) {
         // Region detected successfully - log for confirmation
         error_log(sprintf('[EventBridge] Plugin activated. Region detected: %s', $identity['region']));
-    } elseif (!defined('AWS_EVENTBRIDGE_REGION') || empty(constant('AWS_EVENTBRIDGE_REGION'))) {
+    } elseif (!defined('EVENT_BRIDGE_REGION') || empty(constant('EVENT_BRIDGE_REGION'))) {
         // No region from IMDS and no fallback constant
-        $activation_warnings[] = 'AWS region could not be detected from EC2 instance metadata and AWS_EVENTBRIDGE_REGION is not defined. Please ensure the plugin is running on an EC2 instance or define AWS_EVENTBRIDGE_REGION in wp-config.php.';
+        $activation_warnings[] = 'AWS region could not be detected from EC2 instance metadata and EVENT_BRIDGE_REGION is not defined. Please ensure the plugin is running on an EC2 instance or define EVENT_BRIDGE_REGION in wp-config.php.';
     } else {
         // Using fallback region from constant
-        error_log(sprintf('[EventBridge] Plugin activated. Using fallback region from constant: %s', constant('AWS_EVENTBRIDGE_REGION')));
+        error_log(sprintf('[EventBridge] Plugin activated. Using fallback region from constant: %s', constant('EVENT_BRIDGE_REGION')));
     }
 
     // Store activation errors/warnings for display
@@ -2204,7 +2576,7 @@ function eventbridge_post_events_activate()
             'Add to wp-config.php:</p>' .
             '<pre>define(\'AWS_EVENTBRIDGE_ACCESS_KEY_ID\', \'your-access-key-id\');<br>' .
             'define(\'AWS_EVENTBRIDGE_SECRET_ACCESS_KEY\', \'your-secret-access-key\');<br>' .
-            'define(\'AWS_EVENTBRIDGE_REGION\', \'us-east-1\'); // Optional if not on EC2</pre>' .
+            'define(\'EVENT_BRIDGE_REGION\', \'us-east-1\'); // Optional if not on EC2</pre>' .
             '<p><strong>Option 2: EC2 Instance Role (Recommended)</strong><br>' .
             'Attach an IAM role to your EC2 instance with the following policy:</p>' .
             '<pre>{\n' .
