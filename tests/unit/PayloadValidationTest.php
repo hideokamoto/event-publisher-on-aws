@@ -6,37 +6,6 @@
  * to verify JSON encoding, size validation, and error handling.
  */
 
-// Define minimal WP_Error class for unit tests in global namespace
-if (!class_exists('WP_Error')) {
-    class WP_Error {
-        public $errors = [];
-        public $error_data = [];
-
-        public function __construct($code = '', $message = '', $data = '') {
-            if (empty($code)) {
-                return;
-            }
-            $this->errors[$code][] = $message;
-            if (!empty($data)) {
-                $this->error_data[$code] = $data;
-            }
-        }
-
-        public function get_error_message() {
-            $code = $this->get_error_code();
-            if (empty($code)) {
-                return '';
-            }
-            return $this->errors[$code][0] ?? '';
-        }
-
-        public function get_error_code() {
-            $codes = array_keys($this->errors);
-            return $codes[0] ?? '';
-        }
-    }
-}
-
 namespace EventPublisherOnAWS\Tests\Unit;
 
 use Brain\Monkey;
@@ -80,11 +49,12 @@ class PayloadValidationTest extends TestCase
         });
         // Mock wp_remote_request to prevent actual HTTP calls during plugin initialization
         Functions\when('wp_remote_request')->justReturn(
-            new WP_Error('http_request_failed', 'Mocked error')
+            new \WP_Error('http_request_failed', 'Mocked error')
         );
         Functions\when('is_wp_error')->alias(function($thing) {
-            return $thing instanceof WP_Error;
+            return $thing instanceof \WP_Error;
         });
+        Functions\when('is_admin')->justReturn(false);
 
         // Load the plugin file to get EventBridgePutEvents class (after mocks are set up)
         if (!class_exists('EventBridgePutEvents')) {
