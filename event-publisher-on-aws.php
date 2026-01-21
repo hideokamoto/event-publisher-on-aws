@@ -144,8 +144,9 @@ class EventBridgePutEvents
     private $endpoint;
     private $serviceName;
     private $eventBusName;
+    private $logger;
 
-    public function __construct($accessKeyId, $secretAccessKey, $region, $sessionToken = null, $eventBusName = 'default')
+    public function __construct($accessKeyId, $secretAccessKey, $region, $sessionToken = null, $eventBusName = 'default', $logger = null)
     {
         // Validate credential parameters
         if (empty($accessKeyId) || empty($secretAccessKey)) {
@@ -164,6 +165,7 @@ class EventBridgePutEvents
         $this->endpoint = 'events.' . $region . '.amazonaws.com';
         $this->serviceName = 'events';
         $this->eventBusName = $eventBusName;
+        $this->logger = $logger;
     }
 
     public function sendEvent($source, $detailType, $detail)
@@ -312,6 +314,16 @@ class EventBridgePutEvents
                     ));
                 }
 
+                // Debug logging for retry attempts
+                if ($this->logger && $attempt < $maxRetries) {
+                    $this->logger->log_debug('EventBridge API retry due to network error', array(
+                        'attempt' => $attempt + 1,
+                        'max_retries' => $maxRetries + 1,
+                        'error' => $lastError,
+                        'retry_delay' => $retryDelay
+                    ));
+                }
+
                 // Retry on WP_Error (network issues, etc.)
                 if ($attempt < $maxRetries) {
                     sleep($retryDelay);
@@ -349,6 +361,17 @@ class EventBridgePutEvents
                                 $retryDelay
                             ));
                         }
+
+                        // Debug logging for retry attempts
+                        if ($this->logger) {
+                            $this->logger->log_debug('EventBridge API retry due to retryable HTTP error', array(
+                                'attempt' => $attempt + 1,
+                                'max_retries' => $maxRetries + 1,
+                                'http_code' => $statusCode,
+                                'retry_delay' => $retryDelay
+                            ));
+                        }
+
                         sleep($retryDelay);
                         $retryDelay *= 2; // Exponential backoff
                         continue;
@@ -429,6 +452,17 @@ class EventBridgePutEvents
                                     $retryDelay
                                 ));
                             }
+
+                            // Debug logging for retry attempts
+                            if ($this->logger) {
+                                $this->logger->log_debug('EventBridge API retry due to partial failure', array(
+                                    'attempt' => $attempt + 1,
+                                    'max_retries' => $maxRetries + 1,
+                                    'failed_count' => $failedCount,
+                                    'retry_delay' => $retryDelay
+                                ));
+                            }
+
                             sleep($retryDelay);
                             $retryDelay *= 2; // Exponential backoff
                             continue;
@@ -594,6 +628,10 @@ class EventBridgePostEvents
     // Valid setting values
     const VALID_EVENT_FORMATS = array('legacy', 'envelope');
     const VALID_SEND_MODES = array('sync', 'async');
+    const VALID_LOG_LEVELS = array('error', 'info', 'debug');
+
+    // Logging constants
+    const LOG_DIR_NAME = 'eventbridge-logs';
 
     // Settings defaults
     private $settings;
@@ -612,6 +650,8 @@ class EventBridgePostEvents
         $env_session_token = $this->get_env_var('AWS_SESSION_TOKEN');
 
         if (!empty($env_access_key) && !empty($env_secret_key)) {
+            $this->log_debug('AWS credentials resolved from environment variables');
+
             $credentials = array(
                 'access_key_id' => $env_access_key,
                 'secret_access_key' => $env_secret_key,
@@ -632,6 +672,8 @@ class EventBridgePostEvents
             $const_secret_key = constant('AWS_EVENTBRIDGE_SECRET_ACCESS_KEY');
 
             if (!empty($const_access_key) && !empty($const_secret_key)) {
+                $this->log_debug('AWS credentials resolved from WordPress constants');
+
                 return array(
                     'access_key_id' => $const_access_key,
                     'secret_access_key' => $const_secret_key,
@@ -643,6 +685,8 @@ class EventBridgePostEvents
         // Fallback to EC2 instance role credentials
         $instance_creds = $this->get_instance_credentials();
         if ($instance_creds !== null) {
+            $this->log_debug('AWS credentials resolved from EC2 instance role');
+
             return array(
                 'access_key_id' => $instance_creds['AccessKeyId'],
                 'secret_access_key' => $instance_creds['SecretAccessKey'],
@@ -651,6 +695,7 @@ class EventBridgePostEvents
             );
         }
 
+        $this->log_error('AWS credentials could not be resolved from any source');
         return null;
     }
 
@@ -818,6 +863,13 @@ class EventBridgePostEvents
         // Note: Client will be initialized after settings are loaded to get event_bus_name
         $this->client = null;
 
+        // Log plugin initialization
+        $this->log_info('EventBridge plugin initialized', array(
+            'credential_source' => $this->credential_source,
+            'region' => $this->region,
+            'region_source' => $this->region_source
+        ));
+
         // Load metrics from WordPress options
         $this->load_metrics();
 
@@ -872,7 +924,8 @@ class EventBridgePostEvents
                 $this->secret_key,
                 $effective_region,
                 $this->session_token,
-                $event_bus_name
+                $event_bus_name,
+                $this
             );
         }
         return $this->client;
@@ -892,6 +945,8 @@ class EventBridgePostEvents
             'event_source_name' => 'wordpress',
             'aws_region_override' => '',
             'enabled_post_types' => array('post'), // Post types to send events for
+            'enable_debug_logging' => false,
+            'debug_log_level' => 'error',
         );
     }
 
@@ -1085,11 +1140,38 @@ class EventBridgePostEvents
             'eventbridge_main_section'
         );
 
+        // Debug Logging Section
+        add_settings_section(
+            'eventbridge_debug_section',
+            __('Debug Logging', 'eventbridge-post-events'),
+            null,
+            'eventbridge-settings'
+        );
+
+        add_settings_field(
+            'enable_debug_logging',
+            __('Enable Debug Logging', 'eventbridge-post-events'),
+            array($this, 'render_debug_logging_field'),
+            'eventbridge-settings',
+            'eventbridge_debug_section'
+        );
+
+        add_settings_field(
+            'debug_log_level',
+            __('Log Level', 'eventbridge-post-events'),
+            array($this, 'render_log_level_field'),
+            'eventbridge-settings',
+            'eventbridge_debug_section'
+        );
+
         // Handle test connection
         add_action('admin_post_eventbridge_test_connection', array($this, 'handle_test_connection'));
 
         // Handle metrics reset
         add_action('admin_post_eventbridge_reset_metrics', array($this, 'handle_reset_metrics'));
+
+        // Handle clear logs
+        add_action('admin_post_eventbridge_clear_logs', array($this, 'handle_clear_logs'));
     }
 
     /**
@@ -1177,6 +1259,22 @@ class EventBridgePostEvents
         if (empty($sanitized['enabled_post_types'])) {
             $sanitized['enabled_post_types'] = $defaults['enabled_post_types'];
         }
+
+        // Sanitize enable_debug_logging
+        $sanitized['enable_debug_logging'] = isset($input['enable_debug_logging']) && $input['enable_debug_logging'] === '1';
+
+        // Sanitize debug_log_level
+        $sanitized['debug_log_level'] = isset($input['debug_log_level']) && in_array($input['debug_log_level'], self::VALID_LOG_LEVELS, true)
+            ? $input['debug_log_level']
+            : $defaults['debug_log_level'];
+
+        // Log settings save
+        $this->log_info('Plugin settings saved', array(
+            'event_format' => $sanitized['event_format'],
+            'send_mode' => $sanitized['send_mode'],
+            'debug_logging' => $sanitized['enable_debug_logging'] ? 'enabled' : 'disabled',
+            'log_level' => $sanitized['debug_log_level']
+        ));
 
         return $sanitized;
     }
@@ -1402,6 +1500,204 @@ class EventBridgePostEvents
     }
 
     /**
+     * Render debug logging field
+     */
+    public function render_debug_logging_field()
+    {
+        $enabled = $this->get_setting('enable_debug_logging');
+        ?>
+        <label>
+            <input type="checkbox"
+                   name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[enable_debug_logging]"
+                   value="1"
+                   <?php checked($enabled, true); ?>>
+            <?php esc_html_e('Enable debug logging', 'eventbridge-post-events'); ?>
+        </label>
+        <p class="description">
+            <?php esc_html_e('Logs plugin operations to a dedicated log file for debugging purposes. Logs are stored in wp-content/eventbridge-logs/eventbridge.log', 'eventbridge-post-events'); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Render log level field
+     */
+    public function render_log_level_field()
+    {
+        $current_level = $this->get_setting('debug_log_level');
+        $enabled = $this->get_setting('enable_debug_logging');
+        $disabled = !$enabled ? 'disabled' : '';
+        ?>
+        <select name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[debug_log_level]" <?php echo esc_attr($disabled); ?>>
+            <option value="error" <?php selected($current_level, 'error'); ?>>
+                <?php esc_html_e('Error - Only log errors', 'eventbridge-post-events'); ?>
+            </option>
+            <option value="info" <?php selected($current_level, 'info'); ?>>
+                <?php esc_html_e('Info - Log errors and informational messages', 'eventbridge-post-events'); ?>
+            </option>
+            <option value="debug" <?php selected($current_level, 'debug'); ?>>
+                <?php esc_html_e('Debug - Log everything including debug messages', 'eventbridge-post-events'); ?>
+            </option>
+        </select>
+        <p class="description">
+            <?php
+            if (!$enabled) {
+                esc_html_e('Enable debug logging to configure the log level.', 'eventbridge-post-events');
+            } else {
+                esc_html_e('Select the minimum level of messages to log. Debug includes all messages, Info excludes debug messages, Error only logs errors.', 'eventbridge-post-events');
+            }
+            ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Get the path to the log file
+     *
+     * @return string Full path to the log file
+     */
+    private function get_log_file_path()
+    {
+        $upload_dir = wp_upload_dir();
+        $log_dir = dirname($upload_dir['basedir']) . '/' . self::LOG_DIR_NAME;
+        return $log_dir . '/eventbridge.log';
+    }
+
+    /**
+     * Ensure the log directory exists and is protected
+     *
+     * @return bool True if directory exists or was created successfully
+     */
+    private function ensure_log_directory()
+    {
+        $upload_dir = wp_upload_dir();
+        $log_dir = dirname($upload_dir['basedir']) . '/' . self::LOG_DIR_NAME;
+
+        // Create directory if it doesn't exist
+        if (!file_exists($log_dir)) {
+            if (!wp_mkdir_p($log_dir)) {
+                return false;
+            }
+        }
+
+        // Create .htaccess file to deny access
+        $htaccess_file = $log_dir . '/.htaccess';
+        if (!file_exists($htaccess_file)) {
+            $htaccess_content = "deny from all\n";
+            file_put_contents($htaccess_file, $htaccess_content);
+        }
+
+        return true;
+    }
+
+    /**
+     * Check if a message at the given level should be logged
+     *
+     * @param string $message_level The level of the message (error, info, debug)
+     * @return bool True if the message should be logged
+     */
+    private function should_log($message_level)
+    {
+        if (!$this->get_setting('enable_debug_logging')) {
+            return false;
+        }
+
+        $configured_level = $this->get_setting('debug_log_level');
+
+        // Define level hierarchy (lower number = higher priority)
+        $level_priority = array(
+            'error' => 1,
+            'info' => 2,
+            'debug' => 3,
+        );
+
+        $message_priority = isset($level_priority[$message_level]) ? $level_priority[$message_level] : 999;
+        $configured_priority = isset($level_priority[$configured_level]) ? $level_priority[$configured_level] : 1;
+
+        // Log if configured level priority >= message level priority
+        return $configured_priority >= $message_priority;
+    }
+
+    /**
+     * Write a log entry to the log file
+     *
+     * @param string $level Log level (error, info, debug)
+     * @param string $message Log message
+     * @param array $context Optional context data
+     */
+    private function write_log($level, $message, $context = array())
+    {
+        if (!$this->should_log($level)) {
+            return;
+        }
+
+        if (!$this->ensure_log_directory()) {
+            return;
+        }
+
+        $log_file = $this->get_log_file_path();
+        $timestamp = current_time('Y-m-d H:i:s');
+        $level_upper = strtoupper($level);
+
+        // Format context data
+        $context_str = '';
+        if (!empty($context)) {
+            $context_parts = array();
+            foreach ($context as $key => $value) {
+                if (is_array($value) || is_object($value)) {
+                    $value = json_encode($value);
+                }
+                $context_parts[] = $key . '=' . $value;
+            }
+            $context_str = ' [' . implode(', ', $context_parts) . ']';
+        }
+
+        $log_entry = sprintf(
+            "[%s] %s: %s%s\n",
+            $timestamp,
+            $level_upper,
+            $message,
+            $context_str
+        );
+
+        // Append to log file
+        file_put_contents($log_file, $log_entry, FILE_APPEND);
+    }
+
+    /**
+     * Log an error message
+     *
+     * @param string $message Log message
+     * @param array $context Optional context data
+     */
+    public function log_error($message, $context = array())
+    {
+        $this->write_log('error', $message, $context);
+    }
+
+    /**
+     * Log an info message
+     *
+     * @param string $message Log message
+     * @param array $context Optional context data
+     */
+    public function log_info($message, $context = array())
+    {
+        $this->write_log('info', $message, $context);
+    }
+
+    /**
+     * Log a debug message
+     *
+     * @param string $message Log message
+     * @param array $context Optional context data
+     */
+    public function log_debug($message, $context = array())
+    {
+        $this->write_log('debug', $message, $context);
+    }
+
+    /**
      * Display and delete transient messages
      * Reduces duplication for displaying settings errors stored in transients
      *
@@ -1536,6 +1832,45 @@ class EventBridgePostEvents
                     </form>
                 </div>
             </div>
+
+            <?php if ($this->get_setting('enable_debug_logging')): ?>
+            <!-- Debug Logging Section -->
+            <div class="card" style="max-width:800px;margin-bottom:20px;">
+                <h2><?php esc_html_e('Debug Logs', 'eventbridge-post-events'); ?></h2>
+                <p>
+                    <strong><?php esc_html_e('Log File Path:', 'eventbridge-post-events'); ?></strong>
+                    <code><?php echo esc_html($this->get_log_file_path()); ?></code>
+                </p>
+
+                <h3><?php esc_html_e('Recent Log Entries (Last 20 lines)', 'eventbridge-post-events'); ?></h3>
+                <?php
+                $log_file = $this->get_log_file_path();
+                if (file_exists($log_file) && is_readable($log_file)) {
+                    $lines = file($log_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+                    if ($lines !== false && count($lines) > 0) {
+                        $recent_lines = array_slice($lines, -20);
+                        echo '<pre style="background:#f5f5f5;padding:10px;overflow-x:auto;max-height:400px;overflow-y:auto;font-size:12px;border:1px solid #ddd;">';
+                        foreach ($recent_lines as $line) {
+                            echo esc_html($line) . "\n";
+                        }
+                        echo '</pre>';
+                    } else {
+                        echo '<p>' . esc_html__('Log file is empty.', 'eventbridge-post-events') . '</p>';
+                    }
+                } else {
+                    echo '<p>' . esc_html__('Log file does not exist or is not readable.', 'eventbridge-post-events') . '</p>';
+                }
+                ?>
+
+                <div style="margin-top:15px;">
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;">
+                        <?php wp_nonce_field('eventbridge_clear_logs', 'eventbridge_clear_logs_nonce'); ?>
+                        <input type="hidden" name="action" value="eventbridge_clear_logs">
+                        <?php submit_button(__('Clear Logs', 'eventbridge-post-events'), 'secondary', 'clear_logs', false); ?>
+                    </form>
+                </div>
+            </div>
+            <?php endif; ?>
 
             <form action="options.php" method="post">
                 <?php
@@ -2075,6 +2410,14 @@ class EventBridgePostEvents
             return;
         }
 
+        // Log event dispatch
+        $this->log_info('Post event prepared for dispatch', array(
+            'post_id' => $post->ID,
+            'event_type' => $event_name,
+            'post_type' => $post_type,
+            'status_transition' => $old_status . ' -> ' . $new_status
+        ));
+
         $this->dispatch_event($this->get_setting('event_source_name'), $event_name, $event_payload);
     }
 
@@ -2104,6 +2447,14 @@ class EventBridgePostEvents
         );
 
         $event_payload = $this->prepare_event_payload($event_data, $post_id, true);
+
+        // Log delete event
+        $this->log_info('Delete event prepared for dispatch', array(
+            'post_id' => $post_id,
+            'event_type' => $event_name,
+            'post_type' => $post->post_type
+        ));
+
         $this->dispatch_event($this->get_setting('event_source_name'), $event_name, $event_payload);
     }
 
@@ -2130,6 +2481,12 @@ class EventBridgePostEvents
     {
         $send_mode = $this->get_setting('send_mode');
 
+        // Log dispatch mode
+        $this->log_debug('Dispatching event', array(
+            'event_name' => $event_name,
+            'send_mode' => $send_mode
+        ));
+
         if ($send_mode === 'sync') {
             // 同期送信 - 即座にEventBridgeへ送信
             $this->do_send_event($source, $event_name, $event_payload);
@@ -2149,10 +2506,33 @@ class EventBridgePostEvents
      */
     private function do_send_event($source, $detailType, $detail)
     {
+        // Log before API call
+        $this->log_debug('Sending event to EventBridge API', array(
+            'source' => $source,
+            'detail_type' => $detailType
+        ));
+
         $result = $this->get_client()->sendEvent($source, $detailType, $detail);
         $this->track_event_result($result);
 
-        if (!$result['success']) {
+        if ($result['success']) {
+            // Log successful send
+            $this->log_info('Event sent successfully to EventBridge', array(
+                'detail_type' => $detailType
+            ));
+        } else {
+            // Log failure with details
+            $error_message = isset($result['error']) ? $result['error'] : 'Unknown error';
+            $is_transient = isset($result['is_transient']) ? $result['is_transient'] : false;
+            $http_code = isset($result['response']['http_code']) ? $result['response']['http_code'] : 'N/A';
+
+            $this->log_error('EventBridge API call failed', array(
+                'detail_type' => $detailType,
+                'error' => $error_message,
+                'http_code' => $http_code,
+                'is_transient' => $is_transient ? 'yes' : 'no'
+            ));
+
             do_action('eventbridge_send_failed', $source, $detailType, $detail);
         }
 
@@ -2503,6 +2883,39 @@ class EventBridgePostEvents
 
         set_transient('eventbridge_metrics_result', get_settings_errors('eventbridge_metrics'), 30);
         wp_safe_redirect(add_query_arg('eventbridge_metrics_reset', '1', admin_url('options-general.php?page=eventbridge-settings')));
+        exit;
+    }
+
+    /**
+     * Handle clear logs request
+     */
+    public function handle_clear_logs()
+    {
+        // Security checks
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('You do not have permission to perform this action.', 'eventbridge-post-events'));
+        }
+
+        if (!isset($_POST['eventbridge_clear_logs_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['eventbridge_clear_logs_nonce'])), 'eventbridge_clear_logs')) {
+            wp_die(esc_html__('Security check failed.', 'eventbridge-post-events'));
+        }
+
+        // Clear log file by truncating it
+        $log_file = $this->get_log_file_path();
+        if (file_exists($log_file)) {
+            file_put_contents($log_file, '');
+        }
+
+        // Redirect with success message
+        add_settings_error(
+            'eventbridge_test',
+            'logs_cleared',
+            __('Debug logs have been cleared successfully.', 'eventbridge-post-events'),
+            'success'
+        );
+
+        set_transient('eventbridge_test_result', get_settings_errors('eventbridge_test'), 30);
+        wp_safe_redirect(admin_url('options-general.php?page=eventbridge-settings'));
         exit;
     }
 }
