@@ -87,7 +87,7 @@ class AdminSettingsTest extends WP_UnitTestCase
     public function test_save_send_mode_setting()
     {
         $settings = [
-            'event_format' => 'legacy',
+            'event_format' => 'envelope',
             'send_mode' => 'sync',
         ];
 
@@ -102,11 +102,11 @@ class AdminSettingsTest extends WP_UnitTestCase
      */
     public function test_settings_validation_valid_values()
     {
-        $valid_formats = ['legacy', 'envelope'];
+        $valid_formats = ['envelope'];
         $valid_modes = ['sync', 'async'];
 
         foreach ($valid_formats as $format) {
-            $this->assertContains($format, ['legacy', 'envelope']);
+            $this->assertContains($format, ['envelope']);
         }
 
         foreach ($valid_modes as $mode) {
@@ -125,7 +125,7 @@ class AdminSettingsTest extends WP_UnitTestCase
         ];
 
         // Simulate sanitization logic
-        $valid_formats = ['legacy', 'envelope'];
+        $valid_formats = ['envelope'];
         $valid_modes = ['sync', 'async'];
 
         $format_valid = in_array($invalid_settings['event_format'], $valid_formats, true);
@@ -210,18 +210,18 @@ class AdminSettingsTest extends WP_UnitTestCase
      */
     public function test_settings_update_flow()
     {
-        // Initial settings
+        // Initial settings with envelope format
         $initial = [
-            'event_format' => 'legacy',
+            'event_format' => 'envelope',
             'send_mode' => 'async',
         ];
         update_option('eventbridge_settings', $initial);
 
         // Verify initial
         $saved = get_option('eventbridge_settings');
-        $this->assertEquals('legacy', $saved['event_format']);
+        $this->assertEquals('envelope', $saved['event_format']);
 
-        // Update settings
+        // Update settings (format remains envelope)
         $updated = [
             'event_format' => 'envelope',
             'send_mode' => 'sync',

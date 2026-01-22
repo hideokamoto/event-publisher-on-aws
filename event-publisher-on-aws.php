@@ -626,7 +626,7 @@ class EventBridgePostEvents
     const REGION_CACHE_DURATION = 86400;       // 24 hours for cached region from IMDS
 
     // Valid setting values
-    const VALID_EVENT_FORMATS = array('legacy', 'envelope');
+    const VALID_EVENT_FORMATS = array('envelope');
     const VALID_SEND_MODES = array('sync', 'async');
     const VALID_LOG_LEVELS = array('error', 'info', 'debug');
 
@@ -1117,14 +1117,6 @@ class EventBridgePostEvents
         );
 
         add_settings_field(
-            'event_format',
-            __('イベント形式', 'eventbridge-post-events'),
-            array($this, 'render_event_format_field'),
-            'eventbridge-settings',
-            'eventbridge_main_section'
-        );
-
-        add_settings_field(
             'send_mode',
             __('送信モード', 'eventbridge-post-events'),
             array($this, 'render_send_mode_field'),
@@ -1185,10 +1177,8 @@ class EventBridgePostEvents
         $sanitized = array();
         $defaults = $this->get_default_settings();
 
-        // Sanitize event_format
-        $sanitized['event_format'] = isset($input['event_format']) && in_array($input['event_format'], self::VALID_EVENT_FORMATS, true)
-            ? $input['event_format']
-            : $defaults['event_format'];
+        // Always use envelope format
+        $sanitized['event_format'] = 'envelope';
 
         // Sanitize send_mode
         $sanitized['send_mode'] = isset($input['send_mode']) && in_array($input['send_mode'], self::VALID_SEND_MODES, true)
@@ -1414,31 +1404,6 @@ class EventBridgePostEvents
     public function render_section_description()
     {
         echo '<p>' . esc_html__('EventBridgeへのイベント送信方法を設定します。', 'eventbridge-post-events') . '</p>';
-    }
-
-    /**
-     * Render event format field
-     */
-    public function render_event_format_field()
-    {
-        $current = $this->get_setting('event_format');
-        ?>
-        <fieldset>
-            <label>
-                <input type="radio" name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[event_format]" value="legacy" <?php checked($current, 'legacy'); ?>>
-                <?php esc_html_e('レガシー形式（プロトタイプ互換）', 'eventbridge-post-events'); ?>
-            </label>
-            <p class="description"><?php esc_html_e('イベントデータをそのまま送信します。既存の受信側との互換性を維持します。', 'eventbridge-post-events'); ?></p>
-            <pre style="background:#f5f5f5;padding:10px;margin:5px 0 15px;font-size:12px;">{"id": "123", "title": "記事タイトル", ...}</pre>
-
-            <label>
-                <input type="radio" name="<?php echo esc_attr(self::OPTION_SETTINGS); ?>[event_format]" value="envelope" <?php checked($current, 'envelope'); ?>>
-                <?php esc_html_e('エンベロープ形式（推奨）', 'eventbridge-post-events'); ?>
-            </label>
-            <p class="description"><?php esc_html_e('イベントID、タイムスタンプ、コリレーションID等のメタデータを含めて送信します。', 'eventbridge-post-events'); ?></p>
-            <pre style="background:#f5f5f5;padding:10px;margin:5px 0;font-size:12px;">{"event_id": "uuid", "correlation_id": "uuid", "data": {"id": "123", ...}}</pre>
-        </fieldset>
-        <?php
     }
 
     /**
@@ -2431,17 +2396,11 @@ class EventBridgePostEvents
      */
     private function prepare_event_payload($event_data, $post_id, $is_delete_event = false)
     {
-        $event_format = $this->get_setting('event_format');
-
-        if ($event_format === 'envelope') {
-            $correlation_id = $is_delete_event
-                ? $this->get_existing_correlation_id($post_id)
-                : $this->get_or_create_correlation_id($post_id);
-            return $this->create_event_envelope($event_data, $correlation_id);
-        }
-
-        // Legacy format - send event_data directly
-        return $event_data;
+        // Always use envelope format
+        $correlation_id = $is_delete_event
+            ? $this->get_existing_correlation_id($post_id)
+            : $this->get_or_create_correlation_id($post_id);
+        return $this->create_event_envelope($event_data, $correlation_id);
     }
 
     /**
@@ -2929,21 +2888,15 @@ class EventBridgePostEvents
             'message' => 'EventBridge connection test'
         );
 
-        // Respect event_format setting for test event
-        $event_format = $this->get_setting('event_format');
-        if ($event_format === 'envelope') {
-            $test_event_payload = array(
-                'event_id' => wp_generate_uuid4(),
-                'event_timestamp' => current_time('c'),
-                'event_version' => '1.0',
-                'source_system' => get_bloginfo('url'),
-                'correlation_id' => wp_generate_uuid4(),
-                'data' => $test_event_data
-            );
-        } else {
-            // Legacy format - send test_event_data directly
-            $test_event_payload = $test_event_data;
-        }
+        // Always use envelope format for test event
+        $test_event_payload = array(
+            'event_id' => wp_generate_uuid4(),
+            'event_timestamp' => current_time('c'),
+            'event_version' => '1.0',
+            'source_system' => get_bloginfo('url'),
+            'correlation_id' => wp_generate_uuid4(),
+            'data' => $test_event_data
+        );
 
         $result = $this->get_client()->sendEvent(
             $this->get_setting('event_source_name'),
