@@ -1788,7 +1788,9 @@ class EventBridgePostEvents
         );
 
         // Append to log file
-        file_put_contents($log_file, $log_entry, FILE_APPEND);
+        if (false === file_put_contents($log_file, $log_entry, FILE_APPEND)) {
+            error_log('EventBridge: Failed to write to log file: ' . $log_file);
+        }
     }
 
     /**
@@ -3028,17 +3030,29 @@ class EventBridgePostEvents
 
         // Clear log file by truncating it
         $log_file = $this->get_log_file_path();
+        $clear_success = true;
         if (file_exists($log_file)) {
-            file_put_contents($log_file, '');
+            if (false === file_put_contents($log_file, '')) {
+                $clear_success = false;
+            }
         }
 
-        // Redirect with success message
-        add_settings_error(
-            'eventbridge_test',
-            'logs_cleared',
-            __('Debug logs have been cleared successfully.', 'eventbridge-post-events'),
-            'success'
-        );
+        // Redirect with appropriate message
+        if ($clear_success) {
+            add_settings_error(
+                'eventbridge_test',
+                'logs_cleared',
+                __('Debug logs have been cleared successfully.', 'eventbridge-post-events'),
+                'success'
+            );
+        } else {
+            add_settings_error(
+                'eventbridge_test',
+                'logs_clear_failed',
+                __('Failed to clear debug logs. Please check file permissions and disk space.', 'eventbridge-post-events'),
+                'error'
+            );
+        }
 
         set_transient('eventbridge_test_result', get_settings_errors('eventbridge_test'), 30);
         wp_safe_redirect(admin_url('options-general.php?page=eventbridge-settings'));
