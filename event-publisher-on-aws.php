@@ -1580,14 +1580,141 @@ class EventBridgePostEvents
             }
         }
 
-        // Create .htaccess file to deny access
+        // Create .htaccess file with modern Apache directives and legacy fallback
         $htaccess_file = $log_dir . '/.htaccess';
         if (!file_exists($htaccess_file)) {
-            $htaccess_content = "deny from all\n";
-            file_put_contents($htaccess_file, $htaccess_content);
+            $htaccess_content = "# Deny all access to this directory\n";
+            $htaccess_content .= "<IfModule mod_authz_core.c>\n";
+            $htaccess_content .= "    Require all denied\n";
+            $htaccess_content .= "</IfModule>\n";
+            $htaccess_content .= "<IfModule !mod_authz_core.c>\n";
+            $htaccess_content .= "    Deny from all\n";
+            $htaccess_content .= "</IfModule>\n";
+
+            // Write atomically using temp file + rename
+            $temp_file = $htaccess_file . '.tmp';
+            if (file_put_contents($temp_file, $htaccess_content) !== false) {
+                rename($temp_file, $htaccess_file);
+            }
+        }
+
+        // Create web.config for IIS with deny-all rule
+        $webconfig_file = $log_dir . '/web.config';
+        if (!file_exists($webconfig_file)) {
+            $webconfig_content = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+            $webconfig_content .= "<configuration>\n";
+            $webconfig_content .= "  <system.webServer>\n";
+            $webconfig_content .= "    <security>\n";
+            $webconfig_content .= "      <authorization>\n";
+            $webconfig_content .= "        <remove users=\"*\" roles=\"\" verbs=\"\" />\n";
+            $webconfig_content .= "        <add accessType=\"Deny\" users=\"*\" />\n";
+            $webconfig_content .= "      </authorization>\n";
+            $webconfig_content .= "    </security>\n";
+            $webconfig_content .= "  </system.webServer>\n";
+            $webconfig_content .= "</configuration>\n";
+
+            // Write atomically using temp file + rename
+            $temp_file = $webconfig_file . '.tmp';
+            if (file_put_contents($temp_file, $webconfig_content) !== false) {
+                rename($temp_file, $webconfig_file);
+            }
+        }
+
+        // Create index.php to prevent directory listing
+        $index_file = $log_dir . '/index.php';
+        if (!file_exists($index_file)) {
+            $index_content = "<?php\n// Silence is golden.\n";
+
+            // Write atomically using temp file + rename
+            $temp_file = $index_file . '.tmp';
+            if (file_put_contents($temp_file, $index_content) !== false) {
+                rename($temp_file, $index_file);
+            }
         }
 
         return true;
+    }
+
+    /**
+     * Read the last N lines from a file efficiently without loading entire file into memory
+     *
+     * @param string $file_path Path to the file
+     * @param int $num_lines Number of lines to read from the end
+     * @return array|false Array of lines or false on failure
+     */
+    private function read_last_lines($file_path, $num_lines = 20)
+    {
+        if (!is_readable($file_path)) {
+            return false;
+        }
+
+        // Try using tail command if available (most efficient)
+        if (function_exists('shell_exec') && !ini_get('safe_mode')) {
+            $tail_output = @shell_exec('tail -n ' . (int)$num_lines . ' ' . escapeshellarg($file_path) . ' 2>&1');
+            if ($tail_output !== null && $tail_output !== '') {
+                // Check if output looks like an error (contains "tail:" or similar)
+                if (stripos($tail_output, 'tail:') === false && stripos($tail_output, 'command not found') === false) {
+                    $lines = explode("\n", rtrim($tail_output, "\n"));
+                    return $lines;
+                }
+            }
+        }
+
+        // Fallback: Use streaming approach with backwards reading
+        $file = @fopen($file_path, 'r');
+        if (!$file) {
+            return false;
+        }
+
+        // Get file size
+        fseek($file, 0, SEEK_END);
+        $file_size = ftell($file);
+
+        // If file is empty
+        if ($file_size === 0) {
+            fclose($file);
+            return array();
+        }
+
+        // Read file in chunks from the end
+        $lines = array();
+        $chunk_size = 4096;
+        $position = $file_size;
+        $buffer = '';
+
+        while (count($lines) < $num_lines && $position > 0) {
+            // Calculate chunk to read
+            $read_size = min($chunk_size, $position);
+            $position -= $read_size;
+
+            // Read chunk
+            fseek($file, $position, SEEK_SET);
+            $chunk = fread($file, $read_size);
+
+            // Prepend to buffer
+            $buffer = $chunk . $buffer;
+
+            // Extract complete lines
+            $buffer_lines = explode("\n", $buffer);
+
+            // Keep the incomplete first line in buffer
+            if ($position > 0) {
+                $buffer = array_shift($buffer_lines);
+            } else {
+                $buffer = '';
+            }
+
+            // Add lines to result (in reverse since we're reading backwards)
+            while (count($buffer_lines) > 0 && count($lines) < $num_lines) {
+                $line = array_pop($buffer_lines);
+                if ($line !== '') {
+                    array_unshift($lines, $line);
+                }
+            }
+        }
+
+        fclose($file);
+        return $lines;
     }
 
     /**
@@ -1846,9 +1973,8 @@ class EventBridgePostEvents
                 <?php
                 $log_file = $this->get_log_file_path();
                 if (file_exists($log_file) && is_readable($log_file)) {
-                    $lines = file($log_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-                    if ($lines !== false && count($lines) > 0) {
-                        $recent_lines = array_slice($lines, -20);
+                    $recent_lines = $this->read_last_lines($log_file, 20);
+                    if ($recent_lines !== false && count($recent_lines) > 0) {
                         echo '<pre style="background:#f5f5f5;padding:10px;overflow-x:auto;max-height:400px;overflow-y:auto;font-size:12px;border:1px solid #ddd;">';
                         foreach ($recent_lines as $line) {
                             echo esc_html($line) . "\n";
