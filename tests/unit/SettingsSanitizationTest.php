@@ -381,6 +381,22 @@ class SettingsSanitizationTest extends TestCase
     }
 
     /**
+     * Test settings sanitization rejects legacy format
+     */
+    public function test_sanitize_settings_legacy_format_rejected()
+    {
+        $input = [
+            'event_format' => 'legacy',
+            'send_mode' => 'async',
+        ];
+
+        $result = $this->instance->sanitize_settings($input);
+
+        // Legacy format should be treated as invalid and default to 'envelope'
+        $this->assertEquals('envelope', $result['event_format']);
+    }
+
+    /**
      * Test settings sanitization rejects invalid send_mode
      */
     public function test_sanitize_settings_invalid_send_mode()
