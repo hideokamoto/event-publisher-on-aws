@@ -105,10 +105,10 @@ class AdminSettingsTest extends WP_UnitTestCase
         $valid_formats = ['envelope'];
         $valid_modes = ['sync', 'async'];
 
-        foreach ($valid_formats as $format) {
-            $this->assertContains($format, ['envelope']);
-        }
+        // Verify only envelope format is valid
+        $this->assertEquals(['envelope'], $valid_formats);
 
+        // Verify send modes
         foreach ($valid_modes as $mode) {
             $this->assertContains($mode, ['sync', 'async']);
         }

@@ -3,7 +3,7 @@
 Plugin Name: EventBridge Post Events
 Plugin URI: https://example.com/eventbridge-post-events
 Description: Sends events to Amazon EventBridge when WordPress posts are published, updated, or deleted
-Version: 1.0
+Version: 2.0.0
 Author: Your Name
 Author URI: https://example.com
 */
@@ -2889,14 +2889,7 @@ class EventBridgePostEvents
         );
 
         // Always use envelope format for test event
-        $test_event_payload = array(
-            'event_id' => wp_generate_uuid4(),
-            'event_timestamp' => current_time('c'),
-            'event_version' => '1.0',
-            'source_system' => get_bloginfo('url'),
-            'correlation_id' => wp_generate_uuid4(),
-            'data' => $test_event_data
-        );
+        $test_event_payload = $this->create_event_envelope($test_event_data, wp_generate_uuid4());
 
         $result = $this->get_client()->sendEvent(
             $this->get_setting('event_source_name'),
