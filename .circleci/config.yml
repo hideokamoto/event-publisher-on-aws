@@ -1,0 +1,53 @@
+version: 2.1
+
+jobs:
+  semgrep-scan:
+    docker:
+      - image: semgrep/semgrep
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: Create output directory
+          command: mkdir -p /tmp/semgrep
+      - run:
+          name: Semgrep scan (JSON for artifacts)
+          command: |
+            semgrep scan \
+              --config p/default \
+              --config p/php \
+              --json \
+              --output /tmp/semgrep/results.json \
+              .
+      - run:
+          name: Semgrep scan (JUnit XML for Tests tab)
+          command: |
+            semgrep scan \
+              --config p/default \
+              --config p/php \
+              --error \
+              --junit-xml \
+              --output /tmp/semgrep/results.xml \
+              .
+      - store_test_results:
+          path: /tmp/semgrep
+      - store_artifacts:
+          path: /tmp/semgrep/results.json
+          destination: semgrep/results.json
+
+workflows:
+  # Runs on every commit (PR branches included when CircleCI builds them).
+  security:
+    jobs:
+      - semgrep-scan
+
+  # Weekly full scan on default branch (registry rules evolve over time).
+  security-weekly:
+    triggers:
+      - schedule:
+          cron: "0 3 * * 1"
+          filters:
+            branches:
+              only: main
+    jobs:
+      - semgrep-scan

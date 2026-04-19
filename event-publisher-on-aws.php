@@ -1615,6 +1615,7 @@ class EventBridgePostEvents
 
         // Try using tail command if available (most efficient)
         if (function_exists('shell_exec') && !ini_get('safe_mode')) {
+            // nosemgrep: php.lang.security.exec-use.exec-use — line count is cast to int; path is escapeshellarg()
             $tail_output = @shell_exec('tail -n ' . (int)$num_lines . ' ' . escapeshellarg($file_path) . ' 2>&1');
             if ($tail_output !== null && $tail_output !== '') {
                 // Check if output looks like an error (contains "tail:" or similar)
