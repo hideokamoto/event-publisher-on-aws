@@ -1,0 +1,10 @@
+# Dependencies (never ship with plugin; no need to scan)
+node_modules/
+vendor/
+
+# Build / env artifacts
+dist/
+build/
+
+# Test doubles and fixtures (may trigger security-style rules intentionally)
+tests/fixtures/
