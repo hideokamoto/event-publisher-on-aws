@@ -65,8 +65,8 @@ jobs:
 
   phpunit:
     machine:
-      image: ubuntu-2404:current
-    resource_class: medium.gen2
+      image: ubuntu-2204:current
+    resource_class: medium
     parameters:
       php_version:
         type: string
