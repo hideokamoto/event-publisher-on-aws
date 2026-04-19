@@ -1,5 +1,4 @@
 {
-  "name": "event-publisher-on-aws",
   "core": "WordPress/WordPress#6.7",
   "phpVersion": "8.0",
   "plugins": [
