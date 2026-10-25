@@ -57,12 +57,16 @@ class ActivationDeactivationTest extends WP_UnitTestCase
     }
 
     /**
-     * Test plugin constants are defined
+     * Test the plugin does not define the setting override constants itself
+     *
+     * EVENT_BUS_NAME and EVENT_SOURCE_NAME are optional wp-config.php overrides. Defining them by
+     * default would stop the admin settings from taking effect.
      */
-    public function test_plugin_constants_defined()
+    public function test_plugin_does_not_define_setting_override_constants()
     {
-        $this->assertTrue(defined('EVENT_BUS_NAME'), 'EVENT_BUS_NAME constant should be defined');
-        $this->assertTrue(defined('EVENT_SOURCE_NAME'), 'EVENT_SOURCE_NAME constant should be defined');
+        $this->assertTrue(defined('EVENTBRIDGE_POST_EVENTS_FILE'), 'EVENTBRIDGE_POST_EVENTS_FILE constant should be defined');
+        $this->assertFalse(defined('EVENT_BUS_NAME'), 'EVENT_BUS_NAME should only come from wp-config.php');
+        $this->assertFalse(defined('EVENT_SOURCE_NAME'), 'EVENT_SOURCE_NAME should only come from wp-config.php');
     }
 
     /**
@@ -117,8 +121,8 @@ class ActivationDeactivationTest extends WP_UnitTestCase
         $count_before = $this->count_scheduled_eventbridge_events();
         $this->assertGreaterThan(0, $count_before, 'Events should be scheduled');
 
-        // Simulate deactivation by clearing scheduled events
-        wp_clear_scheduled_hook('eventbridge_async_send_event');
+        // Run the plugin's deactivation callback
+        eventbridge_post_events_deactivate();
 
         // Verify events are cleared
         $count_after = $this->count_scheduled_eventbridge_events();

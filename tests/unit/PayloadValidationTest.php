@@ -31,7 +31,10 @@ class PayloadValidationTest extends TestCase
             }
             return $defaults;
         });
-        Functions\when('get_option')->justReturn(false);
+        // Like WordPress, return the default when the option does not exist
+        Functions\when('get_option')->alias(function($option, $default = false) {
+            return $default;
+        });
         Functions\when('get_transient')->justReturn(false);
         Functions\when('set_transient')->justReturn(true);
         Functions\when('register_activation_hook')->justReturn(null);
@@ -42,7 +45,7 @@ class PayloadValidationTest extends TestCase
             return strip_tags($str);
         });
         Functions\when('get_post_types')->justReturn([
-            'post' => (object)['name' => 'post', 'label' => 'Posts'],
+            'post' => (object)['name' => 'post', 'label' => 'Posts', 'labels' => (object)['name' => 'Posts']],
         ]);
         Functions\when('apply_filters')->alias(function($filter, $value) {
             return $value;
