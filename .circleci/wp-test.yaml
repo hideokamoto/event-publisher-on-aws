@@ -67,6 +67,9 @@ jobs:
     machine:
       image: ubuntu-2404:current
     resource_class: medium.gen2
+    # wp-env mounts the plugin under the checkout directory's basename; the npm
+    # test scripts expect wp-content/plugins/event-publisher-on-aws.
+    working_directory: ~/event-publisher-on-aws
     parameters:
       php_version:
         type: string
