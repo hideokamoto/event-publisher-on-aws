@@ -38,8 +38,8 @@ class SettingsSanitizationTest extends TestCase
         });
         Functions\when('add_settings_error')->justReturn(null);
         Functions\when('get_post_types')->justReturn([
-            'post' => (object)['name' => 'post', 'label' => 'Posts'],
-            'page' => (object)['name' => 'page', 'label' => 'Pages'],
+            'post' => (object)['name' => 'post', 'label' => 'Posts', 'labels' => (object)['name' => 'Posts']],
+            'page' => (object)['name' => 'page', 'label' => 'Pages', 'labels' => (object)['name' => 'Pages']],
         ]);
         Functions\when('apply_filters')->alias(function($filter, $value) {
             return $value;
@@ -53,7 +53,10 @@ class SettingsSanitizationTest extends TestCase
             }
             return $defaults;
         });
-        Functions\when('get_option')->justReturn(false);
+        // Like WordPress, return the default when the option does not exist
+        Functions\when('get_option')->alias(function($option, $default = false) {
+            return $default;
+        });
         Functions\when('get_transient')->justReturn(false);
         Functions\when('set_transient')->justReturn(true);
         Functions\when('register_activation_hook')->justReturn(null);

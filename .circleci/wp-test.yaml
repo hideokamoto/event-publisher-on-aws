@@ -67,6 +67,9 @@ jobs:
     machine:
       image: ubuntu-2404:current
     resource_class: medium.gen2
+    # wp-env mounts the plugin under the checkout directory's basename; the npm
+    # test scripts expect wp-content/plugins/event-publisher-on-aws.
+    working_directory: ~/event-publisher-on-aws
     parameters:
       php_version:
         type: string
@@ -106,12 +109,8 @@ jobs:
             - node_modules
       - php/install_php:
           version: <<parameters.php_version>>
-          extensions: >-
-            php<<parameters.php_version>>-mysql,
-            php<<parameters.php_version>>-mbstring,
-            php<<parameters.php_version>>-xml,
-            php<<parameters.php_version>>-curl,
-            php<<parameters.php_version>>-zip
+          # The orb splits on ',' only (IFS=','), so no spaces between entries.
+          extensions: php<<parameters.php_version>>-mysql,php<<parameters.php_version>>-mbstring,php<<parameters.php_version>>-xml,php<<parameters.php_version>>-curl,php<<parameters.php_version>>-zip
       - run:
           name: Prefer matrix PHP as default php binary
           command: |
@@ -132,7 +131,7 @@ jobs:
             else
               WP_CORE_VALUE="\"WordPress/WordPress#${WP_VERSION}\""
             fi
-            cat > .wp-env.override.json << EOF
+            cat > .wp-env.override.json \<< EOF
             {
               "core": ${WP_CORE_VALUE},
               "phpVersion": "<<parameters.php_version>>",
@@ -154,15 +153,21 @@ jobs:
             set -euo pipefail
             npx wp-env run tests-cli --env-cwd=wp-content/plugins/event-publisher-on-aws \
               composer install --no-interaction
+      # wp-env mounts this checkout into the container, so the composer install above
+      # always creates vendor/ here. Check that it stays out of git instead.
       - run:
-          name: Verify vendor directory is not in plugin root
+          name: Verify vendor directory is not tracked by git
           command: |
             set -euo pipefail
-            if [ -d "vendor" ]; then
-              echo "ERROR: vendor/ must not exist in the plugin root on the host."
+            if [ -n "$(git ls-files vendor)" ]; then
+              echo "ERROR: vendor/ is tracked by git. This directory must never be distributed with the plugin."
               exit 1
             fi
-            echo "✓ Verified: vendor/ not present in plugin distribution directory"
+            if ! git check-ignore -q vendor/; then
+              echo "ERROR: vendor/ is not ignored by .gitignore."
+              exit 1
+            fi
+            echo "✓ Verified: vendor/ is ignored and not tracked by git"
       - run:
           name: Run unit tests
           command: npm run test:unit
