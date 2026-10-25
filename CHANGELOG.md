@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- EC2 instance-role credentials and the region are now resolved from IMDS in every context (REST API, WP-CLI, XML-RPC, frontend), not only in admin and wp-cron requests. Before, events triggered outside admin/wp-cron on hosts relying on the instance role were silently not sent, and the region fell back to `us-east-1` once the 24h region cache had expired. ([#36](https://github.com/hideokamoto/event-publisher-on-aws/issues/36))
+
+### Added
+
+- `eventbridge_should_try_imds` filter. Return `false` to skip IMDS entirely. Credentials and region are resolved when the plugin loads, so add the filter from a must-use plugin. To restore the previous admin/wp-cron-only behaviour:
+
+  ```php
+  add_filter('eventbridge_should_try_imds', function () {
+      return is_admin() || (defined('DOING_CRON') && DOING_CRON);
+  });
+  ```
+
+### Changed
+
+- On hosts that are not on EC2 and have no static credentials, the first request of each IMDS failure cache period (5 minutes) in any context now waits up to the IMDS timeout (2 seconds). Previously this happened only in admin and wp-cron requests.
+
 ## [2.0.0] - 2026-01-23
 
 ### ⚠️ BREAKING CHANGES

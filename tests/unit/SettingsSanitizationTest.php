@@ -56,6 +56,7 @@ class SettingsSanitizationTest extends TestCase
         Functions\when('get_option')->justReturn(false);
         Functions\when('get_transient')->justReturn(false);
         Functions\when('set_transient')->justReturn(true);
+        Functions\when('delete_transient')->justReturn(true);
         Functions\when('register_activation_hook')->justReturn(null);
         Functions\when('register_deactivation_hook')->justReturn(null);
         Functions\when('add_action')->justReturn(null);
