@@ -731,8 +731,9 @@ class EventBridgePostEvents
      * Validate and detect AWS region
      * Resolution order: EVENT_BRIDGE_REGION constant → cached region → EC2 metadata → 'us-east-1' default
      *
-     * IMDS is only attempted in admin or wp-cron contexts. The detected region is cached for 24 hours
-     * so frontend requests can use the cached value instead of falling back to 'us-east-1'.
+     * IMDS is attempted in every context (admin, wp-cron, REST API, WP-CLI, frontend) unless the
+     * 'eventbridge_should_try_imds' filter returns false. The detected region is cached for 24 hours,
+     * so IMDS is queried at most once per cache period.
      *
      * @return array Array with 'region' and 'source'
      */
@@ -754,7 +755,7 @@ class EventBridgePostEvents
             }
         }
 
-        // Check cached region (from previous IMDS detection in admin/cron)
+        // Check cached region (from previous IMDS detection)
         $cached_region_data = get_transient(self::TRANSIENT_CACHED_REGION);
         if ($cached_region_data !== false && is_array($cached_region_data)) {
             if (isset($cached_region_data['region']) && $this->validate_region_format($cached_region_data['region'])) {
@@ -768,8 +769,10 @@ class EventBridgePostEvents
             }
         }
 
-        // Only try IMDS in admin or wp-cron contexts to avoid frontend performance impact
-        $should_try_imds = is_admin() || (defined('DOING_CRON') && DOING_CRON);
+        // Try IMDS in every context (admin, wp-cron, REST API, WP-CLI, frontend).
+        // Results (and failures) are cached in transients, so the cost is paid at most once per cache period.
+        // See should_try_imds() for turning IMDS off or limiting it to admin/wp-cron.
+        $should_try_imds = $this->should_try_imds();
 
         if ($should_try_imds) {
             // Try EC2 instance metadata
@@ -782,7 +785,7 @@ class EventBridgePostEvents
                         'source' => 'metadata'
                     );
 
-                    // Cache the detected region for 24 hours so frontend can use it
+                    // Cache the detected region for 24 hours so later requests skip IMDS
                     set_transient(self::TRANSIENT_CACHED_REGION, $region_data, self::REGION_CACHE_DURATION);
 
                     return $region_data;
@@ -802,7 +805,7 @@ class EventBridgePostEvents
 
         // Fallback to us-east-1
         if (!$should_try_imds) {
-            error_log('[EventBridge] Frontend request: Using fallback region us-east-1 (no cached region available)');
+            error_log('[EventBridge] IMDS disabled by eventbridge_should_try_imds filter: Using fallback region us-east-1 (no cached region available)');
         } else {
             error_log('[EventBridge] IMDS detection failed: Using fallback region us-east-1');
         }
@@ -2201,18 +2204,38 @@ class EventBridgePostEvents
     }
 
     /**
+     * EC2 インスタンスメタデータサービス (IMDS) への問い合わせを許可するかどうか
+     *
+     * Defaults to true in every context. Return false from the 'eventbridge_should_try_imds' filter
+     * to skip IMDS entirely. Credentials and region are resolved when this plugin loads,
+     * so the filter must be added from a must-use plugin (a theme's functions.php runs too late).
+     * To restore the previous admin/wp-cron-only behaviour:
+     *
+     *     add_filter('eventbridge_should_try_imds', function () {
+     *         return is_admin() || (defined('DOING_CRON') && DOING_CRON);
+     *     });
+     *
+     * @return bool
+     */
+    private function should_try_imds()
+    {
+        return (bool) apply_filters('eventbridge_should_try_imds', true);
+    }
+
+    /**
      * EC2インスタンスロールから一時的な認証情報を取得する (IMDSv2 with smart caching)
      *
      * Retrieves temporary credentials with expiration-aware caching.
-     * Only attempts IMDS in admin or wp-cron contexts to avoid frontend performance impact.
+     * Attempts IMDS in every context unless the 'eventbridge_should_try_imds' filter returns false.
      *
      * @return array|null Array with AccessKeyId, SecretAccessKey, Token, Expiration or null on failure
      */
     private function get_instance_credentials()
     {
-        // Only try instance credentials in admin or wp-cron contexts
-        $should_try_imds = is_admin() || (defined('DOING_CRON') && DOING_CRON);
-        if (!$should_try_imds) {
+        // Try instance credentials in every context (admin, wp-cron, REST API, WP-CLI, frontend).
+        // Credentials and failures are cached in transients.
+        // See should_try_imds() for turning IMDS off or limiting it to admin/wp-cron.
+        if (!$this->should_try_imds()) {
             return null;
         }
 
