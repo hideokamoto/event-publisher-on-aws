@@ -132,7 +132,7 @@ jobs:
             else
               WP_CORE_VALUE="\"WordPress/WordPress#${WP_VERSION}\""
             fi
-            cat > .wp-env.override.json << EOF
+            cat > .wp-env.override.json \<< EOF
             {
               "core": ${WP_CORE_VALUE},
               "phpVersion": "<<parameters.php_version>>",
