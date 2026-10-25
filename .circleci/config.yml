@@ -37,17 +37,9 @@ jobs:
 
 workflows:
   # Runs on every commit (PR branches included when CircleCI builds them).
+  # Periodic scans on main (registry rules evolve over time) are driven by a
+  # schedule trigger in Project Settings; config-based scheduled workflows are
+  # not supported for GitHub App pipelines and fail at checkout.
   security:
-    jobs:
-      - semgrep-scan
-
-  # Weekly full scan on default branch (registry rules evolve over time).
-  security-weekly:
-    triggers:
-      - schedule:
-          cron: "0 3 * * 1"
-          filters:
-            branches:
-              only: main
     jobs:
       - semgrep-scan
