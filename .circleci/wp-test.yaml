@@ -154,15 +154,21 @@ jobs:
             set -euo pipefail
             npx wp-env run tests-cli --env-cwd=wp-content/plugins/event-publisher-on-aws \
               composer install --no-interaction
+      # wp-env mounts this checkout into the container, so the composer install above
+      # always creates vendor/ here. Check that it stays out of git instead.
       - run:
-          name: Verify vendor directory is not in plugin root
+          name: Verify vendor directory is not tracked by git
           command: |
             set -euo pipefail
-            if [ -d "vendor" ]; then
-              echo "ERROR: vendor/ must not exist in the plugin root on the host."
+            if [ -n "$(git ls-files vendor)" ]; then
+              echo "ERROR: vendor/ is tracked by git. This directory must never be distributed with the plugin."
               exit 1
             fi
-            echo "✓ Verified: vendor/ not present in plugin distribution directory"
+            if ! git check-ignore -q vendor/; then
+              echo "ERROR: vendor/ is not ignored by .gitignore."
+              exit 1
+            fi
+            echo "✓ Verified: vendor/ is ignored and not tracked by git"
       - run:
           name: Run unit tests
           command: npm run test:unit

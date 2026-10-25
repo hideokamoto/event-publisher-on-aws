@@ -13,6 +13,13 @@ class PostStatusTransitionTest extends WP_UnitTestCase
 {
     protected $fixtures;
 
+    /**
+     * Args of eventbridge_async_send_event events scheduled during the test
+     *
+     * @var array
+     */
+    protected $scheduled_events = [];
+
     public function setUp(): void
     {
         parent::setUp();
@@ -22,11 +29,17 @@ class PostStatusTransitionTest extends WP_UnitTestCase
 
         // Mock HTTP requests to prevent real network calls
         add_filter('pre_http_request', [$this, 'mock_http_requests'], 10, 3);
+
+        // In async mode (the default) the plugin schedules eventbridge_async_send_event via wp-cron
+        // instead of running it, so record what gets scheduled
+        $this->scheduled_events = [];
+        add_filter('pre_schedule_event', [$this, 'record_scheduled_event'], 10, 2);
     }
 
     public function tearDown(): void
     {
         remove_filter('pre_http_request', [$this, 'mock_http_requests']);
+        remove_filter('pre_schedule_event', [$this, 'record_scheduled_event']);
         parent::tearDown();
     }
 
@@ -47,6 +60,33 @@ class PostStatusTransitionTest extends WP_UnitTestCase
             }
         }
         return $count;
+    }
+
+    /**
+     * Record the args of each scheduled eventbridge_async_send_event without changing scheduling
+     *
+     * @param null|bool|\WP_Error $pre   Value to short-circuit scheduling with
+     * @param object             $event Event being scheduled
+     * @return null|bool|\WP_Error Unchanged $pre
+     */
+    public function record_scheduled_event($pre, $event)
+    {
+        if ($event->hook === 'eventbridge_async_send_event') {
+            $this->scheduled_events[] = $event->args;
+        }
+        return $pre;
+    }
+
+    /**
+     * Detail types of the eventbridge_async_send_event events scheduled during the test
+     *
+     * @return string[]
+     */
+    private function scheduled_detail_types()
+    {
+        return array_map(function($args) {
+            return $args[1];
+        }, $this->scheduled_events);
     }
 
     /**
@@ -72,16 +112,6 @@ class PostStatusTransitionTest extends WP_UnitTestCase
      */
     public function test_publishing_new_post_creates_event()
     {
-        $event_triggered = false;
-
-        // Hook into async event scheduling
-        add_action('eventbridge_async_send_event', function($source, $detailType, $detail) use (&$event_triggered) {
-            $event_triggered = true;
-            $this->assertEquals('post.published', $detailType);
-            $this->assertArrayHasKey('id', $detail);
-            $this->assertArrayHasKey('title', $detail);
-        }, 10, 3);
-
         // Create and publish a post
         $post_id = $this->factory()->post->create([
             'post_title' => 'Test Post',
@@ -89,7 +119,11 @@ class PostStatusTransitionTest extends WP_UnitTestCase
         ]);
 
         $this->assertGreaterThan(0, $post_id);
-        $this->assertTrue($event_triggered, 'Event should be triggered when post is published');
+        $this->assertSame(['post.published'], $this->scheduled_detail_types(), 'Event should be scheduled when post is published');
+
+        $detail = $this->scheduled_events[0][2];
+        $this->assertSame((string)$post_id, $detail['data']['id']);
+        $this->assertSame('Test Post', $detail['data']['title']);
     }
 
     /**
@@ -103,14 +137,7 @@ class PostStatusTransitionTest extends WP_UnitTestCase
             'post_status' => 'publish',
         ]);
 
-        $event_triggered = false;
-        $event_type = '';
-
-        // Hook into async event scheduling
-        add_action('eventbridge_async_send_event', function($source, $detailType, $detail) use (&$event_triggered, &$event_type) {
-            $event_triggered = true;
-            $event_type = $detailType;
-        }, 10, 3);
+        $this->scheduled_events = [];
 
         // Update the post
         wp_update_post([
@@ -118,8 +145,7 @@ class PostStatusTransitionTest extends WP_UnitTestCase
             'post_title' => 'Updated Title',
         ]);
 
-        $this->assertTrue($event_triggered, 'Event should be triggered when post is updated');
-        $this->assertEquals('post.updated', $event_type);
+        $this->assertSame(['post.updated'], $this->scheduled_detail_types(), 'Event should be scheduled when post is updated');
     }
 
     /**
@@ -133,17 +159,12 @@ class PostStatusTransitionTest extends WP_UnitTestCase
             'post_status' => 'draft',
         ]);
 
-        $event_detail_type = '';
-
-        // Hook into async event scheduling
-        add_action('eventbridge_async_send_event', function($source, $detailType, $detail) use (&$event_detail_type) {
-            $event_detail_type = $detailType;
-        }, 10, 3);
+        $this->assertSame([], $this->scheduled_detail_types(), 'Draft posts should not schedule events');
 
         // Publish the post
         wp_publish_post($post_id);
 
-        $this->assertEquals('post.published', $event_detail_type, 'Should trigger post.published event');
+        $this->assertSame(['post.published'], $this->scheduled_detail_types(), 'Should schedule post.published event');
     }
 
     /**
@@ -157,22 +178,13 @@ class PostStatusTransitionTest extends WP_UnitTestCase
             'post_status' => 'publish',
         ]);
 
-        $delete_event_triggered = false;
-        $deleted_post_id = null;
-
-        // Hook into async event scheduling
-        add_action('eventbridge_async_send_event', function($source, $detailType, $detail) use (&$delete_event_triggered, &$deleted_post_id) {
-            if ($detailType === 'post.deleted') {
-                $delete_event_triggered = true;
-                $deleted_post_id = $detail['id'];
-            }
-        }, 10, 3);
+        $this->scheduled_events = [];
 
         // Delete the post
         wp_delete_post($post_id, true);
 
-        $this->assertTrue($delete_event_triggered, 'Delete event should be triggered');
-        $this->assertEquals((string)$post_id, $deleted_post_id);
+        $this->assertSame(['post.deleted'], $this->scheduled_detail_types(), 'Delete event should be scheduled');
+        $this->assertSame((string)$post_id, $this->scheduled_events[0][2]['data']['id']);
     }
 
     /**

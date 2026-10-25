@@ -75,14 +75,19 @@ jobs:
       - name: Install Composer dependencies in wp-env
         run: npm run test:setup
 
-      - name: Verify vendor directory is not in plugin root
+      # wp-env mounts this checkout into the container, so the composer install above
+      # always creates vendor/ here. Check that it stays out of git instead.
+      - name: Verify vendor directory is not tracked by git
         run: |
-          if [ -d "vendor" ]; then
-            echo "ERROR: vendor/ directory found in plugin root. This directory must never be distributed with the plugin."
-            echo "Composer dependencies are dev-only and should only exist inside wp-env container."
+          if [ -n "$(git ls-files vendor)" ]; then
+            echo "ERROR: vendor/ is tracked by git. This directory must never be distributed with the plugin."
             exit 1
           fi
-          echo "✓ Verified: vendor/ directory not present in plugin distribution"
+          if ! git check-ignore -q vendor/; then
+            echo "ERROR: vendor/ is not ignored by .gitignore."
+            exit 1
+          fi
+          echo "✓ Verified: vendor/ is ignored and not tracked by git"
 
       - name: Run unit tests
         run: npm run test:unit
