@@ -106,12 +106,8 @@ jobs:
             - node_modules
       - php/install_php:
           version: <<parameters.php_version>>
-          extensions: >-
-            php<<parameters.php_version>>-mysql,
-            php<<parameters.php_version>>-mbstring,
-            php<<parameters.php_version>>-xml,
-            php<<parameters.php_version>>-curl,
-            php<<parameters.php_version>>-zip
+          # The orb splits on ',' only (IFS=','), so no spaces between entries.
+          extensions: php<<parameters.php_version>>-mysql,php<<parameters.php_version>>-mbstring,php<<parameters.php_version>>-xml,php<<parameters.php_version>>-curl,php<<parameters.php_version>>-zip
       - run:
           name: Prefer matrix PHP as default php binary
           command: |
