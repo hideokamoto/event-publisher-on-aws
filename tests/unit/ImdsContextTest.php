@@ -11,8 +11,6 @@ namespace EventPublisherOnAWS\Tests\Unit;
 
 use Brain\Monkey;
 use Brain\Monkey\Functions;
-use PHPUnit\Framework\Attributes\PreserveGlobalState;
-use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 
 class ImdsContextTest extends TestCase
@@ -94,7 +92,9 @@ class ImdsContextTest extends TestCase
             }
             return $defaults;
         });
-        Functions\when('get_option')->justReturn(false);
+        Functions\when('get_option')->alias(function($name, $default = false) {
+            return $default;
+        });
         Functions\when('get_transient')->alias(function($name) {
             return array_key_exists($name, $this->transients) ? $this->transients[$name] : false;
         });
@@ -236,9 +236,10 @@ class ImdsContextTest extends TestCase
      *
      * Runs in a separate process because other tests define the AWS_EVENTBRIDGE_* constants,
      * which take precedence over the instance role and cannot be undefined.
+     *
+     * @runInSeparateProcess
+     * @preserveGlobalState disabled
      */
-    #[RunInSeparateProcess]
-    #[PreserveGlobalState(false)]
     public function test_aws_credentials_resolve_instance_role_outside_admin_and_cron()
     {
         $this->mock_imds_credentials_endpoint();
