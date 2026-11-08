@@ -43,6 +43,9 @@ class ImdsContextTest extends TestCase
      */
     private $saved_error_log = false;
 
+    /**
+     * Mock WordPress functions and load the plugin with an in-memory transient store
+     */
     protected function setUp(): void
     {
         parent::setUp();
@@ -129,6 +132,9 @@ class ImdsContextTest extends TestCase
         $this->transients = array();
     }
 
+    /**
+     * Restore error_log and tear down the WordPress mocks
+     */
     protected function tearDown(): void
     {
         ini_set('error_log', $this->saved_error_log === false ? '' : $this->saved_error_log);

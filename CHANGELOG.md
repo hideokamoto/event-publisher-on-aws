@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- On hosts that are not on EC2 and have no static credentials, the first request of each IMDS failure cache period (5 minutes) in any context now waits up to the IMDS timeout (2 seconds). Previously this happened only in admin and wp-cron requests.
+- On hosts that are not on EC2, the first request of each IMDS failure cache period (5 minutes) in any context now waits up to the IMDS timeout (2 seconds) when credentials or the region must be resolved from IMDS. This includes hosts with static credentials but without the `EVENT_BRIDGE_REGION` constant (the `aws_region_override` setting does not skip region detection), because region detection also queries IMDS. Define `EVENT_BRIDGE_REGION` or return `false` from the `eventbridge_should_try_imds` filter to avoid the wait. Previously this happened only in admin and wp-cron requests.
 
 ## [2.0.0] - 2026-01-23
 
