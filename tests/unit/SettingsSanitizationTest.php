@@ -94,7 +94,6 @@ class SettingsSanitizationTest extends TestCase
     protected function callPrivateSanitizeMethod($input, $key, $regex, $error_code, $error_message, $default)
     {
         $method = $this->reflection->getMethod('sanitize_and_validate_setting');
-        $method->setAccessible(true);
         return $method->invoke($this->instance, $input, $key, $regex, $error_code, $error_message, $default);
     }
 

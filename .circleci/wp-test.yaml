@@ -187,5 +187,5 @@ workflows:
           name: phpunit-php<<matrix.php_version>>-wp<<matrix.wp_version>>
           matrix:
             parameters:
-              php_version: ["8.1", "8.2", "8.3"]
+              php_version: ["8.1", "8.2", "8.3", "8.4", "8.5"]
               wp_version: ["6.5", "6.6", "6.7", "latest"]
