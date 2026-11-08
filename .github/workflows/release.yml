@@ -44,10 +44,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           assets=("build/${PLUGIN_SLUG}-${TAG}.zip" "build/${PLUGIN_SLUG}-${TAG}.zip.sha256")
-          # Re-run after a failed upload: the release already exists, so (re)attach the assets.
-          # The zip is reproducible, so the sha256 stays the same
+          # Re-run after a failed upload: gh leaves the release behind as a draft, so (re)attach
+          # the assets and publish it. The zip is reproducible, so the sha256 stays the same
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" "${assets[@]}" --clobber
+            gh release edit "${TAG}" --draft=false
           else
             gh release create "${TAG}" "${assets[@]}" \
               --title "${TAG}" \
