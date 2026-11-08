@@ -32,7 +32,7 @@ tests/
 
 ## Prerequisites
 
-1. **PHP 8.1 or higher** - Required for PHPUnit 10 and modern testing infrastructure
+1. **PHP 8.1 or higher** - Tests run on PHPUnit 9.6, the newest version the WordPress core test library supports
 2. **Node.js and npm** - For running wp-env
 3. **Docker** - wp-env uses Docker containers
 4. **Composer** - For installing PHP test dependencies (installed in container)

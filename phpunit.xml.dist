@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <phpunit
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-    xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.0/phpunit.xsd"
+    xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/9.6/phpunit.xsd"
     bootstrap="tests/bootstrap.php"
     colors="true"
     beStrictAboutOutputDuringTests="true"
@@ -21,10 +21,6 @@
         <include>
             <file>event-publisher-on-aws.php</file>
         </include>
-        <report>
-            <html outputDirectory="tests/coverage/html"/>
-            <text outputFile="php://stdout" showUncoveredFiles="false"/>
-        </report>
     </coverage>
 
     <php>

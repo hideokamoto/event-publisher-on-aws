@@ -20,10 +20,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -32,7 +32,7 @@ jobs:
         run: npm ci
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php-version }}
           extensions: mysqli, mbstring, json, xml
@@ -44,7 +44,7 @@ jobs:
         run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
 
       - name: Cache Composer dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ steps.composer-cache.outputs.dir }}
           key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
@@ -75,14 +75,19 @@ jobs:
       - name: Install Composer dependencies in wp-env
         run: npm run test:setup
 
-      - name: Verify vendor directory is not in plugin root
+      # wp-env mounts this checkout into the container, so the composer install above
+      # always creates vendor/ here. Check that it stays out of git instead.
+      - name: Verify vendor directory is not tracked by git
         run: |
-          if [ -d "vendor" ]; then
-            echo "ERROR: vendor/ directory found in plugin root. This directory must never be distributed with the plugin."
-            echo "Composer dependencies are dev-only and should only exist inside wp-env container."
+          if [ -n "$(git ls-files vendor)" ]; then
+            echo "ERROR: vendor/ is tracked by git. This directory must never be distributed with the plugin."
             exit 1
           fi
-          echo "✓ Verified: vendor/ directory not present in plugin distribution"
+          if ! git check-ignore -q vendor/; then
+            echo "ERROR: vendor/ is not ignored by .gitignore."
+            exit 1
+          fi
+          echo "✓ Verified: vendor/ is ignored and not tracked by git"
 
       - name: Run unit tests
         run: npm run test:unit
@@ -100,7 +105,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Verify composer.json has no production dependencies
         run: |

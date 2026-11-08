@@ -16,6 +16,9 @@
     "WP_DEBUG": true,
     "WP_DEBUG_LOG": true,
     "WP_DEBUG_DISPLAY": false,
-    "SCRIPT_DEBUG": true
+    "SCRIPT_DEBUG": true,
+    "AWS_EVENTBRIDGE_ACCESS_KEY_ID": "test-access-key-id",
+    "AWS_EVENTBRIDGE_SECRET_ACCESS_KEY": "test-secret-access-key",
+    "EVENT_BRIDGE_REGION": "us-east-1"
   }
 }
