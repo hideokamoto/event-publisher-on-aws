@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build plugin zip and publish GitHub Release
+    runs-on: ubuntu-latest
+    env:
+      PLUGIN_SLUG: event-publisher-on-aws
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Check that the tag matches the plugin header Version
+        run: |
+          header_version=$(sed -n 's/^Version:[[:space:]]*//p' "${PLUGIN_SLUG}.php" | tr -d '\r')
+          if [ "v${header_version}" != "${TAG}" ]; then
+            echo "::error::Tag ${TAG} does not match 'Version: ${header_version}' in ${PLUGIN_SLUG}.php"
+            exit 1
+          fi
+
+      - name: Build zip
+        run: |
+          mkdir -p "build/${PLUGIN_SLUG}"
+          cp -R "${PLUGIN_SLUG}.php" uninstall.php assets "build/${PLUGIN_SLUG}/"
+          cd build
+          # Fixed timestamps and file order so the same tag always produces the same sha256
+          find "${PLUGIN_SLUG}" -exec touch -h -d '1980-01-01T00:00:00Z' {} +
+          find "${PLUGIN_SLUG}" -print | LC_ALL=C sort | zip -X -q "${PLUGIN_SLUG}-${TAG}.zip" -@
+          sha256sum "${PLUGIN_SLUG}-${TAG}.zip" > "${PLUGIN_SLUG}-${TAG}.zip.sha256"
+          unzip -l "${PLUGIN_SLUG}-${TAG}.zip"
+          cat "${PLUGIN_SLUG}-${TAG}.zip.sha256"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${TAG}" \
+            "build/${PLUGIN_SLUG}-${TAG}.zip" \
+            "build/${PLUGIN_SLUG}-${TAG}.zip.sha256" \
+            --title "${TAG}" \
+            --generate-notes \
+            --verify-tag
