@@ -1,11 +1,13 @@
 <?php
 /*
 Plugin Name: EventBridge Post Events
-Plugin URI: https://example.com/eventbridge-post-events
+Plugin URI: https://github.com/hideokamoto/event-publisher-on-aws
 Description: Sends events to Amazon EventBridge when WordPress posts are published, updated, or deleted
 Version: 2.0.0
-Author: Your Name
-Author URI: https://example.com
+Requires at least: 6.5
+Requires PHP: 8.1
+Author: Hidetaka Okamoto
+Author URI: https://hidetaka.dev
 */
 
 // Define plugin file constant for reliable reference
