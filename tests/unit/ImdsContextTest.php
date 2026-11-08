@@ -160,7 +160,6 @@ class ImdsContextTest extends TestCase
         $reflection = new \ReflectionClass('EventBridgePostEvents');
         $instance = $reflection->newInstanceWithoutConstructor();
         $target = $reflection->getMethod($method);
-        $target->setAccessible(true);
         return $target->invoke($instance);
     }
 
