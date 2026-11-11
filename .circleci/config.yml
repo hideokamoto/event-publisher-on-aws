@@ -1,6 +1,58 @@
 version: 2.1
 
 jobs:
+  commitlint:
+    docker:
+      - image: cimg/node:24.22
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: "Install commitlint (without lifecycle scripts)"
+          command: |
+            set -euo pipefail
+            COMMITLINT_DIR="${HOME}/commitlint"
+            npm install --prefix "$COMMITLINT_DIR" --ignore-scripts --no-audit --no-fund \
+              @commitlint/cli@21.2.3 \
+              @commitlint/config-conventional@21.2.3
+            # extends は commitlint を実行するディレクトリから解決されるため、設定も
+            # インストール先に置く。subject-case と行長のルールは英語向けで、日本語の
+            # 件名（例: 「Rust を上げる」）や本文を誤って弾くので無効にする。型（feat / fix 等）と
+            # 「型: 件名」の形式はそのまま検証する。
+            cat > "${COMMITLINT_DIR}/commitlint.config.mjs" \<<'EOF'
+            export default {
+              extends: ['@commitlint/config-conventional'],
+              rules: {
+                'subject-case': [0],
+                'body-max-line-length': [0],
+                'footer-max-line-length': [0],
+              },
+            };
+            EOF
+      - run:
+          name: "Lint commit messages on this branch"
+          command: |
+            set -euo pipefail
+            git fetch origin main
+            REPO_DIR="$PWD"
+            COMMITS="$(git rev-list --no-merges origin/main..HEAD)"
+            if [ -z "$COMMITS" ]; then
+              echo "origin/main にないコミットはありません。"
+              exit 0
+            fi
+            cd "${HOME}/commitlint"
+            FAILED=0
+            for sha in $COMMITS; do
+              if ! git -C "$REPO_DIR" log -1 --format=%B "$sha" | ./node_modules/.bin/commitlint; then
+                echo "上のコミット ${sha} のメッセージが Conventional Commits ではありません。" >&2
+                FAILED=1
+              fi
+            done
+            if [ "$FAILED" -ne 0 ]; then
+              echo "例: 'feat: 投稿の予約公開でもイベントを送る' / 'fix(imds): WP-CLI でもインスタンスロールの認証情報を使う'。feat / fix / perf / BREAKING CHANGE が main に入るとリリースされる。" >&2
+              exit 1
+            fi
+
   semgrep-scan:
     docker:
       - image: semgrep/semgrep:1.159.0@sha256:d7d67e1e0c0ed26278ab35f0be082f0afdfd7a880f4927aee86f8127fdbce617
@@ -43,3 +95,13 @@ workflows:
   security:
     jobs:
       - semgrep-scan
+
+  # main へのマージで semantic-release が Conventional Commits から版を決めてリリースする
+  # （hideokamoto/circleci-configurations の workflows/release/wordpress-plugin-github-release.yaml を
+  # 別のパイプライン定義として紐づける）。そのため PR のコミットメッセージをここで検証する。
+  commitlint:
+    jobs:
+      - commitlint:
+          filters:
+            branches:
+              ignore: main
