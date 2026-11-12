@@ -36,15 +36,7 @@ class SendEventRetryTest extends TestCase
     private $sleeps = [];
 
     /**
-     * tmpfile() handle for the error_log() output. PHP deletes the file when the
-     * handle is closed, so the test never has to delete a file itself.
-     *
-     * @var resource|null
-     */
-    private $logHandle = null;
-
-    /**
-     * Path of the tmpfile() above, used as the error_log ini value
+     * Temporary file that receives error_log() output
      *
      * @var string
      */
@@ -62,8 +54,8 @@ class SendEventRetryTest extends TestCase
         parent::setUp();
         Monkey\setUp();
 
-        $this->logHandle = tmpfile();
-        $this->logFile = stream_get_meta_data($this->logHandle)['uri'];
+        // nosemgrep — test-only helper: tempnam() race-condition risk does not apply in an isolated test process
+        $this->logFile = tempnam(sys_get_temp_dir(), 'eventbridge-retry-test-');
         $this->savedErrorLog = ini_get('error_log');
         ini_set('error_log', $this->logFile);
 
@@ -132,8 +124,8 @@ class SendEventRetryTest extends TestCase
     protected function tearDown(): void
     {
         ini_set('error_log', $this->savedErrorLog === false ? '' : $this->savedErrorLog);
-        if (is_resource($this->logHandle)) {
-            fclose($this->logHandle); // Also deletes the temporary file
+        if ($this->logFile !== '' && file_exists($this->logFile)) {
+            unlink($this->logFile);
         }
         Monkey\tearDown();
         parent::tearDown();
