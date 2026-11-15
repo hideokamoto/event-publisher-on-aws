@@ -170,18 +170,16 @@ This plugin uses **ONLY dev dependencies** (`require-dev` in composer.json):
 
 - `vendor/` is in `.gitignore`
 - `vendor/` only exists inside the wp-env Docker container
-- GitHub Actions CI verifies `vendor/` is not present in the repository
+- CircleCI (`verify-no-production-dependencies` and the `phpunit` jobs in `.circleci/wp-test.yaml`) verifies `vendor/` is not present in the repository
 - The workflow will fail if production dependencies are found
 
 ## Continuous Integration
 
-Tests run automatically on GitHub Actions for:
-- All pull requests
-- Pushes to `main` and `develop` branches
-- Multiple PHP versions: 8.1, 8.2, 8.3
+Tests run automatically on CircleCI for pull requests and for merges to `main`:
+- Multiple PHP versions: 8.1, 8.2, 8.3, 8.4, 8.5
 - Multiple WordPress versions: 6.5, 6.6, 6.7, latest
 
-See `.github/workflows/tests.yml` for the complete CI configuration.
+See `.circleci/wp-test.yaml` for the complete CI configuration. It is registered as its own pipeline in the CircleCI project; `.circleci/config.yml` runs commitlint and Semgrep.
 
 ## Writing Tests
 
