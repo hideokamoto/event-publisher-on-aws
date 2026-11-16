@@ -139,6 +139,52 @@ class EventBridgePutEvents
     // Supports standard regions (us-east-1) and GovCloud regions (us-gov-west-1)
     const REGION_FORMAT_REGEX = '/^[a-z]{2,3}(-[a-z]+)+-\d+$/';
 
+    /**
+     * PutEvents entry error codes that are not worth resending.
+     *
+     * Source: the EventBridge API model, shape PutEventsResultEntry, member ErrorCode
+     * (Smithy shape com.amazonaws.eventbridge#PutEventsResultEntry; the same text ships
+     * in botocore 1.43.108 as botocore/data/events/2015-10-07/service-2.json.gz). Its
+     * documentation, quoted with the HTML tags removed and the lines rewrapped:
+     *
+     *   "The error code that indicates why the event submission failed.
+     *    Retryable errors include:
+     *      InternalFailure
+     *        The request processing has failed because of an unknown error, exception or
+     *        failure.
+     *      ThrottlingException
+     *        The request was denied due to request throttling.
+     *    Non-retryable errors include:
+     *      AccessDeniedException
+     *        You do not have sufficient access to perform this action.
+     *      InvalidAccountIdException
+     *        The account ID provided is not valid.
+     *      InvalidArgument
+     *        A specified parameter is not valid.
+     *      MalformedDetail
+     *        The JSON provided is not valid.
+     *      RedactionFailure
+     *        Redacting the CloudTrail event failed.
+     *      NotAuthorizedForSourceException
+     *        You do not have permissions to publish events with this source onto this
+     *        event bus.
+     *      NotAuthorizedForDetailTypeException
+     *        You do not have permissions to publish events with this detail type onto
+     *        this event bus."
+     *
+     * Both lists say "include", so neither is exhaustive. Only the codes listed as
+     * non-retryable stop the retry loop; any other code keeps being retried.
+     */
+    const NON_RETRYABLE_ENTRY_ERROR_CODES = array(
+        'AccessDeniedException',
+        'InvalidAccountIdException',
+        'InvalidArgument',
+        'MalformedDetail',
+        'RedactionFailure',
+        'NotAuthorizedForSourceException',
+        'NotAuthorizedForDetailTypeException',
+    );
+
     private $accessKeyId;
     private $secretAccessKey;
     private $sessionToken;
@@ -270,6 +316,8 @@ class EventBridgePutEvents
         $retryDelay = 1; // Initial delay in seconds
         $lastError = null;
         $lastResponseCode = null;
+        $attemptsMade = 0; // Requests actually sent, reported in the failure log
+        $isPartialFailureRetryable = true; // Set for each partial failure
         $timestamp = date('Y-m-d H:i:s');
 
         // Check if verbose logging is enabled (DRY principle)
@@ -294,6 +342,7 @@ class EventBridgePutEvents
                 ));
             }
 
+            $attemptsMade++;
             $response = wp_remote_request("https://{$this->endpoint}{$path}", array(
                 'method' => $method,
                 'headers' => $headers,
@@ -446,7 +495,17 @@ class EventBridgePutEvents
                             ));
                         }
 
-                        // Retry partial failures if retries remain
+                        // Retry partial failures if retries remain, unless every failed entry
+                        // has an error code that cannot succeed on retry
+                        $isPartialFailureRetryable = $this->hasRetryableFailedEntry($data['Entries'] ?? null);
+
+                        if (!$isPartialFailureRetryable) {
+                            if ($verboseLogging) {
+                                error_log('[EventBridge] Partial failure with a non-retryable error code. Not retrying.');
+                            }
+                            break;
+                        }
+
                         if ($attempt < $maxRetries) {
                             if ($verboseLogging) {
                                 error_log(sprintf(
@@ -494,15 +553,18 @@ class EventBridgePutEvents
         $isLastErrorTransient = false;
         if (is_int($lastResponseCode)) {
             $isLastErrorTransient = ($lastResponseCode >= 500 && $lastResponseCode < 600) || $lastResponseCode === 429;
-        } elseif ($lastResponseCode === 'WP_Error' || $lastResponseCode === 'PartialFailure') {
-            // WP_Error and PartialFailure are considered transient
+        } elseif ($lastResponseCode === 'WP_Error') {
+            // WP_Error is considered transient
             $isLastErrorTransient = true;
+        } elseif ($lastResponseCode === 'PartialFailure') {
+            // A partial failure is transient unless its error code is non-retryable
+            $isLastErrorTransient = $isPartialFailureRetryable;
         }
 
-        // All retries exhausted - log comprehensive error details (excluding sensitive event data)
+        // Retries exhausted or not attempted - log comprehensive error details (excluding sensitive event data)
         error_log(sprintf(
             '[EventBridge] FAILED after %d attempts - DetailType: %s, PostID: %s, LastError: %s, LastResponseCode: %s, IsTransient: %s, Region: %s, EventBus: %s, Timestamp: %s',
-            $maxRetries + 1,
+            $attemptsMade,
             $detailType,
             $postId,
             $lastError,
@@ -547,6 +609,36 @@ class EventBridgePutEvents
             return array('success' => false, 'error' => $errorMsg, 'response' => null, 'is_transient' => false);
         }
         return $json;
+    }
+
+    /**
+     * Whether a PutEvents response with FailedEntryCount > 0 is worth resending
+     *
+     * Returns false only when every failed entry (an entry with an ErrorCode) has a code
+     * listed in NON_RETRYABLE_ENTRY_ERROR_CODES. Any other code, or a response with no
+     * readable ErrorCode, keeps the previous behaviour of retrying.
+     *
+     * @param mixed $entries The Entries array from the PutEvents response
+     * @return bool True if the request should be retried
+     */
+    private function hasRetryableFailedEntry($entries)
+    {
+        if (!is_array($entries)) {
+            return true;
+        }
+
+        $foundFailedEntry = false;
+        foreach ($entries as $entry) {
+            if (!is_array($entry) || !isset($entry['ErrorCode'])) {
+                continue;
+            }
+            $foundFailedEntry = true;
+            if (!in_array($entry['ErrorCode'], self::NON_RETRYABLE_ENTRY_ERROR_CODES, true)) {
+                return true;
+            }
+        }
+
+        return !$foundFailedEntry;
     }
 
     private function getSignatureKey($dateStamp)

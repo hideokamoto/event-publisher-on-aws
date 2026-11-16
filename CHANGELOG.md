@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - EC2 instance-role credentials and the region are now resolved from IMDS in every context (REST API, WP-CLI, XML-RPC, frontend), not only in admin and wp-cron requests. Before, events triggered outside admin/wp-cron on hosts relying on the instance role were silently not sent, and the region fell back to `us-east-1` once the 24h region cache had expired. ([#36](https://github.com/hideokamoto/event-publisher-on-aws/issues/36))
+- A PutEvents partial failure whose error code the EventBridge API model lists as non-retryable (`AccessDeniedException`, `InvalidAccountIdException`, `InvalidArgument`, `MalformedDetail`, `RedactionFailure`, `NotAuthorizedForSourceException`, `NotAuthorizedForDetailTypeException`) is no longer sent 3 more times with 1, 2 and 4 second waits. The request is sent once, and the failure is counted as permanent instead of transient. Other error codes are retried as before.
+- The `[EventBridge] FAILED after N attempts` log line now reports the number of requests actually sent. It used to say 4 even when the request was sent once (for example on HTTP 4xx).
 
 ### Added
 

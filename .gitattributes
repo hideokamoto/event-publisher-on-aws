@@ -12,5 +12,6 @@
 /composer.json export-ignore
 /package-lock.json export-ignore
 /package.json export-ignore
+/patchwork.json export-ignore
 /phpunit.xml.dist export-ignore
 /tests export-ignore
