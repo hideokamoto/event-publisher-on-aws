@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `post.unpublished` event. It is sent when a published post leaves the public site: it is made private, switched back to draft or pending review, or moved to the trash. The detail has the same fields as `post.published`/`post.updated`; `data.status` is the new status (`private`, `draft`, `pending`, `trash`, …) and `data.previous_status` is `publish`. Status changes of a post that was not published send nothing. Permanently deleting a post still sends `post.deleted` (a published post that is moved to the trash first sends `post.unpublished`, then `post.deleted` when it is deleted from the trash). A published post rescheduled to a future date still sends `post.scheduled`.
 - `eventbridge_should_try_imds` filter. Return `false` to skip IMDS entirely. Credentials and region are resolved when the plugin loads, so add the filter from a must-use plugin. To restore the previous admin/wp-cron-only behaviour:
 
   ```php
