@@ -2561,13 +2561,22 @@ class EventBridgePostEvents
             return;
         }
 
-        // Only handle publish and future status transitions
-        if ($new_status !== 'publish' && $new_status !== 'future') {
+        // A published post leaving the public site (private, draft, pending, trash, ...).
+        // Moving to the trash is reversible, so it is sent as post.unpublished;
+        // post.deleted is sent only on permanent deletion (send_delete_post_event).
+        $is_unpublish = $old_status === 'publish'
+            && $new_status !== 'publish'
+            && $new_status !== 'future';
+
+        // Otherwise only handle publish and future status transitions
+        if (!$is_unpublish && $new_status !== 'publish' && $new_status !== 'future') {
             return;
         }
 
         // Determine event type based on status transition
-        if ($new_status === 'future') {
+        if ($is_unpublish) {
+            $event_name = 'post.unpublished';
+        } elseif ($new_status === 'future') {
             // Scheduled post
             $event_name = 'post.scheduled';
         } elseif ($old_status === 'publish') {

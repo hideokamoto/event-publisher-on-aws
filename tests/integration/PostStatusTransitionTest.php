@@ -188,6 +188,113 @@ class PostStatusTransitionTest extends WP_UnitTestCase
     }
 
     /**
+     * Statuses a published post can move to that take it off the public site
+     *
+     * @return array<string, array{string}>
+     */
+    public function unpublish_status_provider()
+    {
+        return [
+            'private' => ['private'],
+            'draft' => ['draft'],
+            'pending' => ['pending'],
+        ];
+    }
+
+    /**
+     * Test that taking a published post off the public site creates post.unpublished
+     *
+     * @dataProvider unpublish_status_provider
+     */
+    public function test_unpublishing_published_post_creates_unpublished_event($new_status)
+    {
+        $post_id = $this->factory()->post->create([
+            'post_title' => 'Post to Unpublish',
+            'post_status' => 'publish',
+        ]);
+
+        $this->scheduled_events = [];
+
+        wp_update_post([
+            'ID' => $post_id,
+            'post_status' => $new_status,
+        ]);
+
+        $this->assertSame(['post.unpublished'], $this->scheduled_detail_types());
+
+        $data = $this->scheduled_events[0][2]['data'];
+        $this->assertSame((string)$post_id, $data['id']);
+        $this->assertSame($new_status, $data['status']);
+        $this->assertSame('publish', $data['previous_status']);
+        $this->assertSame('post', $data['post_type']);
+        $this->assertStringEndsWith('/wp/v2/posts/' . $post_id, $data['api_url']);
+    }
+
+    /**
+     * Test that moving a published post to the trash creates post.unpublished, not post.deleted
+     *
+     * The trash can be restored, so the post is not gone yet; post.deleted is sent
+     * only when it is permanently deleted.
+     */
+    public function test_trashing_published_post_creates_unpublished_event()
+    {
+        $post_id = $this->factory()->post->create([
+            'post_title' => 'Post to Trash',
+            'post_status' => 'publish',
+        ]);
+
+        $this->scheduled_events = [];
+
+        wp_trash_post($post_id);
+
+        $this->assertSame(['post.unpublished'], $this->scheduled_detail_types());
+
+        $data = $this->scheduled_events[0][2]['data'];
+        $this->assertSame((string)$post_id, $data['id']);
+        $this->assertSame('trash', $data['status']);
+        $this->assertSame('publish', $data['previous_status']);
+    }
+
+    /**
+     * Test that permanently deleting a trashed post still creates post.deleted
+     */
+    public function test_deleting_trashed_post_creates_deleted_event()
+    {
+        $post_id = $this->factory()->post->create([
+            'post_title' => 'Post to Trash then Delete',
+            'post_status' => 'publish',
+        ]);
+        wp_trash_post($post_id);
+
+        $this->scheduled_events = [];
+
+        wp_delete_post($post_id, true);
+
+        $this->assertSame(['post.deleted'], $this->scheduled_detail_types());
+    }
+
+    /**
+     * Test that status changes of a post that is not published send nothing
+     *
+     * Nothing about such a post has been sent as published, so there is nothing to take back.
+     */
+    public function test_status_change_of_unpublished_post_creates_no_event()
+    {
+        $post_id = $this->factory()->post->create([
+            'post_title' => 'Never Published',
+            'post_status' => 'draft',
+        ]);
+
+        wp_update_post([
+            'ID' => $post_id,
+            'post_status' => 'private',
+        ]);
+        wp_trash_post($post_id);
+
+        $this->assertSame([], $this->scheduled_detail_types());
+    }
+
+    /**
      * Test that draft posts do not trigger events
      */
     public function test_draft_posts_do_not_trigger_events()
