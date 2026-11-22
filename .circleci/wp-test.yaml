@@ -183,9 +183,32 @@ workflows:
   wp-test:
     jobs:
       - verify-no-production-dependencies
+      # 対応範囲の両端（最小: Requires PHP 8.1 / Requires at least 6.5、最大: PHP 8.5 / WP latest）。
+      # すべてのブランチで動かす。
+      # ジョブ名は matrix と同じ形式（phpunit-php<PHP>-wp<WP>）にそろえる。
+      - phpunit:
+          name: phpunit-php8.1-wp6.5
+          php_version: "8.1"
+          wp_version: "6.5"
+      - phpunit:
+          name: phpunit-php8.5-wplatest
+          php_version: "8.5"
+          wp_version: "latest"
+      # 残りの 18 通りは main だけで動かす。PR ブランチでも 20 通りを毎回回すと、
+      # 1 パイプライン約 900 クレジットかかり、プロジェクトの compute の大半を占めていた
+      # （2026-10-22〜11-20 の Usage Export で、main 以外のブランチの phpunit が 18,667 クレジット）。
+      # 中間の組み合わせだけで壊れる変更は、main へのマージ後にこのジョブで見つける。
       - phpunit:
           name: phpunit-php<<matrix.php_version>>-wp<<matrix.wp_version>>
           matrix:
             parameters:
               php_version: ["8.1", "8.2", "8.3", "8.4", "8.5"]
               wp_version: ["6.5", "6.6", "6.7", "latest"]
+            exclude:
+              - php_version: "8.1"
+                wp_version: "6.5"
+              - php_version: "8.5"
+                wp_version: "latest"
+          filters:
+            branches:
+              only: main

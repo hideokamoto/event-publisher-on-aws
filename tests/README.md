@@ -176,8 +176,8 @@ This plugin uses **ONLY dev dependencies** (`require-dev` in composer.json):
 ## Continuous Integration
 
 Tests run automatically on CircleCI for pull requests and for merges to `main`:
-- Multiple PHP versions: 8.1, 8.2, 8.3, 8.4, 8.5
-- Multiple WordPress versions: 6.5, 6.6, 6.7, latest
+- Every branch: the two ends of the supported range, PHP 8.1 + WordPress 6.5 and PHP 8.5 + WordPress latest
+- `main` only: the full matrix of PHP 8.1, 8.2, 8.3, 8.4, 8.5 × WordPress 6.5, 6.6, 6.7, latest (20 combinations)
 
 See `.circleci/wp-test.yaml` for the complete CI configuration. It is registered as its own pipeline in the CircleCI project; `.circleci/config.yml` runs commitlint and Semgrep.
 
