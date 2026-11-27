@@ -517,33 +517,10 @@ class EventBridgePutEvents
     {
         $kSecret = 'AWS4' . $this->secretAccessKey;
 
-        // Validate hash_hmac operations
         $kDate = hash_hmac('sha256', $dateStamp, $kSecret, true);
-        if ($kDate === false) {
-            throw new Exception('Failed to generate date key in signature derivation');
-        }
-
         $kRegion = hash_hmac('sha256', $this->region, $kDate, true);
-        if ($kRegion === false) {
-            throw new Exception('Failed to generate region key in signature derivation');
-        }
-
         $kService = hash_hmac('sha256', $this->serviceName, $kRegion, true);
-        if ($kService === false) {
-            throw new Exception('Failed to generate service key in signature derivation');
-        }
 
-        $kSigning = hash_hmac('sha256', 'aws4_request', $kService, true);
-        if ($kSigning === false) {
-            throw new Exception('Failed to generate signing key in signature derivation');
-        }
-
-        // Clear intermediate sensitive values from memory
-        $kSecret = null;
-        $kDate = null;
-        $kRegion = null;
-        $kService = null;
-
-        return $kSigning;
+        return hash_hmac('sha256', 'aws4_request', $kService, true);
     }
 }

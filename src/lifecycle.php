@@ -97,20 +97,7 @@ function eventbridge_post_events_activate()
  */
 function eventbridge_post_events_deactivate()
 {
-    // Clear all scheduled single events for async EventBridge sending
-    // WordPress doesn't provide a direct way to get all scheduled events by hook,
-    // so we need to check the cron array
-    $cron_array = get_option('cron');
-
-    if (is_array($cron_array)) {
-        foreach ($cron_array as $timestamp => $cron) {
-            if (isset($cron['eventbridge_async_send_event'])) {
-                foreach ($cron['eventbridge_async_send_event'] as $key => $event) {
-                    wp_unschedule_event($timestamp, 'eventbridge_async_send_event', $event['args']);
-                }
-            }
-        }
-    }
+    wp_unschedule_hook('eventbridge_async_send_event');
 
     // Clear transient notices
     delete_transient('eventbridge_notice_dismissed');

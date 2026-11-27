@@ -9,5 +9,6 @@ rules:
       include:
         - event-publisher-on-aws.php
         - uninstall.php
+        - src/
     severity: ERROR
 

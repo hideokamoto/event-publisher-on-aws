@@ -15,7 +15,7 @@ parameters:
 		-
 			message: '#^Access to property \$ID on an unknown class WP_Post\.$#'
 			identifier: class.notFound
-			count: 7
+			count: 6
 			path: src/EventBridgePostEvents.php
 
 		-
@@ -327,7 +327,7 @@ parameters:
 		-
 			message: '#^Function wp_generate_uuid4 not found\.$#'
 			identifier: function.notFound
-			count: 3
+			count: 5
 			path: src/EventBridgePostEvents.php
 
 		-
@@ -375,7 +375,7 @@ parameters:
 		-
 			message: '#^Function wp_schedule_single_event not found\.$#'
 			identifier: function.notFound
-			count: 2
+			count: 1
 			path: src/EventBridgePostEvents.php
 
 		-
@@ -393,12 +393,6 @@ parameters:
 		-
 			message: '#^Instanceof between WP_Post and WP_Post will always evaluate to true\.$#'
 			identifier: instanceof.alwaysTrue
-			count: 1
-			path: src/EventBridgePostEvents.php
-
-		-
-			message: '#^Method EventBridgePostEvents\:\:send_failure_event\(\) is unused\.$#'
-			identifier: method.unused
 			count: 1
 			path: src/EventBridgePostEvents.php
 
@@ -430,12 +424,6 @@ parameters:
 			message: '#^Function wp_remote_retrieve_response_code not found\.$#'
 			identifier: function.notFound
 			count: 1
-			path: src/EventBridgePutEvents.php
-
-		-
-			message: '#^Strict comparison using \=\=\= between non\-falsy\-string and false will always evaluate to false\.$#'
-			identifier: identical.alwaysFalse
-			count: 4
 			path: src/EventBridgePutEvents.php
 
 		-
@@ -523,7 +511,7 @@ parameters:
 			path: src/lifecycle.php
 
 		-
-			message: '#^Function wp_unschedule_event not found\.$#'
+			message: '#^Function wp_unschedule_hook not found\.$#'
 			identifier: function.notFound
 			count: 1
 			path: src/lifecycle.php

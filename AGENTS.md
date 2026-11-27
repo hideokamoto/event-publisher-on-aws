@@ -32,7 +32,7 @@
 2. **依頼なくルートに README / 設計ドキュメントを増やす** — 根拠のない Markdown はエージェントが「恒久ルール」と誤読する。
 3. **動かない理由をコメントだけで正当化する** — ルールは lint / テスト / 構造に落とす（`scripts/agent-check.sh`、Semgrep、PHPUnit）。
 4. **ユニットテストでプラグインを読まずロジックを再実装する** — 既存の反パターン。新規テストは integration か、実際のクラス・メソッドを叩く。
-5. **`nosemgrep` 無しの `exec` 等** — 既存の Semgrep 例外形式に合わせる。
+5. **`exec` / `eval` 等** — 本番コードに追加しない。既存の `shell_exec` 経路は削除済み。
 6. **本番 AWS への実送信を検証で行う** — `pre_http_request` フィクスチャ（`tests/fixtures/aws-responses.php`）を使う。
 
 ## 静的解析（コストが低い順）

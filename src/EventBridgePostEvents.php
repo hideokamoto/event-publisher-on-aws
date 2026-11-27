@@ -479,7 +479,7 @@ class EventBridgePostEvents
 
         wp_enqueue_style(
             'eventbridge-admin-settings',
-            plugin_dir_url(__FILE__) . 'assets/css/admin-settings.css',
+            plugin_dir_url(EVENTBRIDGE_POST_EVENTS_FILE) . 'assets/css/admin-settings.css',
             array(),
             '1.0.0'
         );
@@ -1033,20 +1033,6 @@ class EventBridgePostEvents
             return false;
         }
 
-        // Try using tail command if available (most efficient)
-        if (function_exists('shell_exec') && !ini_get('safe_mode')) {
-            // nosemgrep: php.lang.security.exec-use.exec-use — line count is cast to int; path is escapeshellarg()
-            $tail_output = @shell_exec('tail -n ' . (int)$num_lines . ' ' . escapeshellarg($file_path) . ' 2>&1');
-            if ($tail_output !== null && $tail_output !== '') {
-                // Check if output looks like an error (contains "tail:" or similar)
-                if (stripos($tail_output, 'tail:') === false && stripos($tail_output, 'command not found') === false) {
-                    $lines = explode("\n", rtrim($tail_output, "\n"));
-                    return $lines;
-                }
-            }
-        }
-
-        // Fallback: Use streaming approach with backwards reading
         $file = @fopen($file_path, 'r');
         if (!$file) {
             return false;
@@ -1777,29 +1763,18 @@ class EventBridgePostEvents
         $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
 
         if (empty($correlation_id)) {
-            // Try wp_generate_uuid4() first (WordPress 4.7+)
-            if (function_exists('wp_generate_uuid4')) {
-                $correlation_id = wp_generate_uuid4();
-            } else {
-                // Fallback: generate UUID v4 manually
-                $correlation_id = $this->generate_uuid_v4();
-            }
+            $correlation_id = wp_generate_uuid4();
 
             $added = add_post_meta($post_id, '_event_correlation_id', $correlation_id, true);
 
-            // If add_post_meta returned false, another request wrote the meta first
-            // Re-read the actual value that was stored
             if ($added === false) {
                 $correlation_id = get_post_meta($post_id, '_event_correlation_id', true);
 
-                // Final fallback if correlation_id is still empty
                 if (empty($correlation_id)) {
-                    // This can happen in a race condition where another process adds an empty meta value.
-                    // We'll generate a new UUID and attempt to save it.
-                    $correlation_id = $this->generate_uuid_v4();
+                    $correlation_id = wp_generate_uuid4();
                     update_post_meta($post_id, '_event_correlation_id', $correlation_id);
                     error_log(sprintf(
-                        '[EventBridge] Corrected empty correlation ID. Using fallback UUID for post ID %d: %s',
+                        '[EventBridge] Corrected empty correlation ID for post ID %d: %s',
                         $post_id,
                         $correlation_id
                     ));
@@ -1810,22 +1785,6 @@ class EventBridgePostEvents
         return $correlation_id;
     }
 
-    /**
-     * Generate UUID v4 as fallback when wp_generate_uuid4() is not available
-     *
-     * @return string UUID v4
-     */
-    private function generate_uuid_v4()
-    {
-        $data = random_bytes(16);
-
-        // Set version to 0100
-        $data[6] = chr(ord($data[6]) & 0x0f | 0x40);
-        // Set bits 6-7 to 10
-        $data[8] = chr(ord($data[8]) & 0x3f | 0x80);
-
-        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
-    }
 
     /**
      * Prepare event payload based on format setting
@@ -1934,18 +1893,6 @@ class EventBridgePostEvents
         );
 
         $event_payload = $this->prepare_event_payload($event_data, $post->ID);
-
-        // Early fast-fail: check if event payload can be JSON encoded
-        // Note: The authoritative size check happens in sendEvent() after building the full envelope
-        $payload_json = json_encode($event_payload);
-        if ($payload_json === false) {
-            error_log(sprintf(
-                '[EventBridge] Failed to JSON encode event payload for post ID %d: %s',
-                $post->ID,
-                json_last_error_msg()
-            ));
-            return;
-        }
 
         // Log event dispatch
         $this->log_info('Post event prepared for dispatch', array(
@@ -2109,24 +2056,6 @@ class EventBridgePostEvents
                 $source
             ));
         }
-    }
-
-    /**
-     * 失敗イベントをEventBridgeに送信する（非同期スケジュール）
-     *
-     * @param string $event_name 失敗したイベント名
-     * @param int $post_id 投稿ID
-     */
-    private function send_failure_event($event_name, $post_id)
-    {
-        $event_name = 'failure.' . $event_name;
-        $event_data = array(
-            'id' => (string)$post_id,
-            'failed_event' => $event_name
-        );
-
-        // 非同期でEventBridgeに送信（UIをブロックしない）
-        wp_schedule_single_event(time(), 'eventbridge_async_send_event', array($this->get_setting('event_source_name'), $event_name, $event_data));
     }
 
     /**
