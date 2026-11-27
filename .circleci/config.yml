@@ -1,6 +1,19 @@
 version: 2.1
 
 jobs:
+  agent-check:
+    docker:
+      - image: cimg/base:current
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: Install jq
+          command: sudo apt-get update && sudo apt-get install -y jq
+      - run:
+          name: Agent structure gates
+          command: bash scripts/agent-check.sh
+
   commitlint:
     docker:
       - image: cimg/node:24.22
@@ -68,6 +81,7 @@ jobs:
             semgrep scan \
               --config p/default \
               --config p/php \
+              --config semgrep/rules/agent-environment.yml \
               --json \
               --output /tmp/semgrep/results.json \
               .
@@ -77,6 +91,7 @@ jobs:
             semgrep scan \
               --config p/default \
               --config p/php \
+              --config semgrep/rules/agent-environment.yml \
               --error \
               --junit-xml \
               --output /tmp/semgrep/results.xml \
@@ -94,6 +109,7 @@ workflows:
   # not supported for GitHub App pipelines and fail at checkout.
   security:
     jobs:
+      - agent-check
       - semgrep-scan
 
   # main へのマージで semantic-release が Conventional Commits から版を決めてリリースする

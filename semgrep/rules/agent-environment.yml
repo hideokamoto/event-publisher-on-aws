@@ -1,0 +1,25 @@
+rules:
+  - id: event-publisher-no-eval
+    patterns:
+      - pattern: eval(...)
+    message: >
+      eval() は禁止。ロジックを関数に落とすか、テスト用コードを tests/ に閉じる。
+    languages: [php]
+    paths:
+      include:
+        - event-publisher-on-aws.php
+        - uninstall.php
+    severity: ERROR
+
+  - id: event-publisher-discourage-root-php-split
+    patterns:
+      - pattern-regex: (?i)require.*event-publisher-on-aws
+    message: >
+      新しいルートレベル PHP ファイルでメインプラグインを require するパターンは避ける。
+      変更は event-publisher-on-aws.php に集約するか、ユーザーが src/ 分割を依頼した場合のみ分割する。
+    languages: [php]
+    paths:
+      exclude:
+        - tests/**
+        - "**/vendor/**"
+    severity: WARNING

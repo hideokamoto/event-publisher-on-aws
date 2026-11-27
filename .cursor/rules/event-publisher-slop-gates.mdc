@@ -1,0 +1,31 @@
+---
+description: Slop prevention and architecture boundaries for event-publisher-on-aws
+alwaysApply: true
+---
+
+# Event Publisher — agent gates
+
+Read `AGENTS.md` at the repo root before editing production code.
+
+## Codebase
+
+- Production code lives in `event-publisher-on-aws.php` and `uninstall.php` unless the user explicitly requests a split into `src/`.
+- Put AWS HTTP/signing in `EventBridgePutEvents`. Put WordPress hooks and admin UI in `EventBridgePostEvents`.
+
+## Static checks (run before claiming done)
+
+- `npm run agent:check` must pass.
+- After PHP changes, run `npm run test:unit` and `npm run test:integration` when wp-env is available.
+
+## Forbidden slop
+
+- Do not add packages to `composer.json` `require` (only `php` is allowed).
+- Do not commit `vendor/` or add production Composer dependencies.
+- Do not add unsolicited markdown in the repo root (except when the user asks for docs).
+- Do not add long justification comments for shortcuts; fix the root cause or add a test/lint.
+- Do not copy timer/workaround patterns from other projects; this plugin has no renderer/main split.
+
+## Tests
+
+- Prefer `tests/integration/` for behavior that touches WordPress options, cron, or post transitions.
+- Mock HTTP with patterns from `tests/fixtures/aws-responses.php` and `pre_http_request` filters.
