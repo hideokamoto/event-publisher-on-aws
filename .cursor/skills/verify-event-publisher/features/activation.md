@@ -4,6 +4,7 @@
 
 - 有効化時の認証情報チェック（静的キー / IMDS）
 - 有効化警告オプション `eventbridge_activation_warnings`
+- `eventbridge_post_events_activate()` によるデフォルトオプション作成
 
 ## How to get to it (user POV)
 
@@ -11,13 +12,20 @@
 
 ## Driving it with PHPUnit
 
-`tests/integration/ActivationDeactivationTest.php`。
+| 検証内容 | テスト |
+|---------|--------|
+| 有効化コールバックで `eventbridge_settings` / `eventbridge_metrics` が作成される | `test_activation_callback_seeds_default_options` |
+| 無効化で cron が消える | `test_deactivation_cleanup` |
+| 定数による認証情報 | `test_credentials_check` |
 
 ```bash
 npm run test:integration -- --filter ActivationDeactivationTest
 ```
 
+手動確認: `eventbridge_post_events_activate()` 実行後、`get_option('eventbridge_activation_errors')` が false、`eventbridge_settings.send_mode` が `async` であること。
+
 ## Gotchas
 
-- IMDS は `169.254.169.254` への HTTP をフィクスチャで差し替える。
-- 有効化フックは `eventbridge_post_events_activate()`（ファイル末尾付近）。
+- IMDS は `pre_http_request` でモックする（統合テストの `mock_http_requests`）。
+- 認証情報が無い環境では有効化が `wp_die` する。CI は wp-config にテスト用キーを注入している。
+- 実装は `src/lifecycle.php` の `eventbridge_post_events_activate()`。

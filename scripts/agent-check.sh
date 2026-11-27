@@ -15,12 +15,15 @@ if ! command -v jq >/dev/null 2>&1; then
   fail "jq is required"
 fi
 
-REQUIRE_KEYS="$(jq -r '.require // {} | keys[]' composer.json 2>/dev/null || true)"
+if ! REQUIRE_KEYS="$(jq -r '.require // {} | keys[]' composer.json 2>&1)"; then
+  fail "cannot parse composer.json require section: ${REQUIRE_KEYS}"
+fi
+
 if [ -z "$REQUIRE_KEYS" ]; then
   echo "ok: require is empty"
 else
   while IFS= read -r key; do
-  [ -z "$key" ] && continue
+    [ -z "$key" ] && continue
     if [ "$key" != "php" ]; then
       fail "composer.json require must not list production package: $key"
     fi
@@ -28,15 +31,29 @@ else
   echo "ok: require only contains php (if any)"
 fi
 
-if [ -d vendor ]; then
-  fail "vendor/ must not exist in the working tree"
+echo "== vendor/ (git policy) =="
+if ! command -v git >/dev/null 2>&1; then
+  fail "git is required for vendor/ policy checks"
 fi
-echo "ok: no vendor/ directory"
 
-if ! grep -q 'vendor' .gitignore 2>/dev/null; then
-  fail "vendor/ must be listed in .gitignore"
+TRACKED_VENDOR="$(git ls-files -- 'vendor/' 'vendor' 2>/dev/null || true)"
+if [ -n "$TRACKED_VENDOR" ]; then
+  fail "vendor/ must not be tracked by git"
 fi
-echo "ok: vendor/ in .gitignore"
+echo "ok: no tracked files under vendor/"
+
+if ! git check-ignore -q vendor/; then
+  fail "vendor/ must be ignored by git (check .gitignore)"
+fi
+echo "ok: git ignores vendor/"
+
+if [ -d vendor ] && [ ! -f vendor/.gitkeep ]; then
+  echo "ok: local vendor/ present (ignored dev dependencies)"
+elif [ -d vendor ]; then
+  echo "ok: local vendor/ present"
+else
+  echo "ok: no local vendor/ directory"
+fi
 
 echo "== forbidden patterns in production PHP =="
 PROD_PHP=(
