@@ -145,6 +145,84 @@ class ActivationDeactivationTest extends WP_UnitTestCase
     }
 
     /**
+     * Test eventbridge_post_events_activate() seeds options when credentials are available
+     */
+    public function test_activation_callback_seeds_default_options()
+    {
+        delete_option('eventbridge_settings');
+        delete_option('eventbridge_metrics');
+        delete_option('eventbridge_activation_warnings');
+        delete_option('eventbridge_activation_errors');
+
+        add_filter('pre_http_request', [$this, 'mock_http_requests'], 10, 3);
+
+        eventbridge_post_events_activate();
+
+        remove_filter('pre_http_request', [$this, 'mock_http_requests']);
+
+        $settings = get_option('eventbridge_settings');
+        $this->assertIsArray($settings);
+        $this->assertSame('async', $settings['send_mode']);
+        $this->assertSame('envelope', $settings['event_format']);
+
+        $metrics = get_option('eventbridge_metrics');
+        $this->assertIsArray($metrics);
+        $this->assertSame(0, $metrics['successful_events']);
+
+        $errors = get_option('eventbridge_activation_errors', false);
+        $this->assertFalse($errors, 'Activation should not record errors when test credentials exist');
+
+        $warnings = get_option('eventbridge_activation_warnings', false);
+        $this->assertFalse(
+            $warnings,
+            'Activation should not record warnings when credentials exist and IMDS returns a region'
+        );
+    }
+
+    /**
+     * When IMDS cannot return a region and EVENT_BRIDGE_REGION is unset, activation stores warnings
+     */
+    public function test_activation_callback_records_region_warnings_without_fallback()
+    {
+        if (defined('EVENT_BRIDGE_REGION') && trim((string) constant('EVENT_BRIDGE_REGION')) !== '') {
+            $this->markTestSkipped('EVENT_BRIDGE_REGION is defined in this environment');
+        }
+
+        delete_option('eventbridge_activation_warnings');
+        delete_option('eventbridge_activation_errors');
+
+        add_filter('pre_http_request', [$this, 'mock_imds_failure'], 10, 3);
+
+        eventbridge_post_events_activate();
+
+        remove_filter('pre_http_request', [$this, 'mock_imds_failure']);
+
+        $warnings = get_option('eventbridge_activation_warnings', false);
+        $this->assertIsArray($warnings);
+        $this->assertNotEmpty($warnings);
+        $this->assertStringContainsString('EVENT_BRIDGE_REGION', $warnings[0]);
+    }
+
+    public function mock_imds_failure($preempt, $args, $url)
+    {
+        if (strpos($url, '169.254.169.254') !== false) {
+            return new \WP_Error('http_request_failed', 'Mocked IMDS failure');
+        }
+        return $preempt;
+    }
+
+    public function mock_http_requests($preempt, $args, $url)
+    {
+        if (strpos($url, '169.254.169.254') !== false) {
+            return [
+                'response' => ['code' => 200],
+                'body' => json_encode(['region' => 'us-east-1']),
+            ];
+        }
+        return $preempt;
+    }
+
+    /**
      * Test credentials validation on activation
      */
     public function test_credentials_check()

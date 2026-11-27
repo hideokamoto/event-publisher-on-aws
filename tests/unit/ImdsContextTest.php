@@ -125,7 +125,7 @@ class ImdsContextTest extends TestCase
 
         // Load the plugin file to get EventBridgePostEvents class (after mocks are set up)
         if (!class_exists('EventBridgePostEvents')) {
-            require_once dirname(dirname(__DIR__)) . '/event-publisher-on-aws.php';
+            require_once dirname(__DIR__) . '/support/load-src.php';
         }
 
         // Loading the plugin runs its constructor, which may cache an IMDS failure; start each test clean

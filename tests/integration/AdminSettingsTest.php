@@ -82,6 +82,25 @@ class AdminSettingsTest extends WP_UnitTestCase
     }
 
     /**
+     * Plugin get_setting() returns values saved in eventbridge_settings
+     */
+    public function test_plugin_get_setting_reads_saved_options()
+    {
+        $settings = [
+            'event_format' => 'envelope',
+            'send_mode' => 'sync',
+            'event_bus_name' => 'ci-test-bus',
+        ];
+        update_option('eventbridge_settings', $settings);
+
+        $plugin = new \EventBridgePostEvents();
+
+        $this->assertSame('sync', $plugin->get_setting('send_mode'));
+        $this->assertSame('envelope', $plugin->get_setting('event_format'));
+        $this->assertSame('ci-test-bus', $plugin->get_setting('event_bus_name'));
+    }
+
+    /**
      * Test saving send mode setting
      */
     public function test_save_send_mode_setting()

@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<ruleset name="event-publisher-on-aws">
+	<description>WordPress coding standards for the EventBridge Post Events plugin.</description>
+
+	<file>event-publisher-on-aws.php</file>
+	<file>src</file>
+	<file>uninstall.php</file>
+
+	<exclude-pattern>*/vendor/*</exclude-pattern>
+	<exclude-pattern>*/node_modules/*</exclude-pattern>
+	<exclude-pattern>*/tests/*</exclude-pattern>
+
+	<rule ref="WordPress">
+		<exclude name="WordPress.Files.FileName"/>
+	</rule>
+
+	<config name="minimum_supported_wp_version" value="6.5"/>
+	<config name="testVersion" value="8.1-"/>
+
+	<rule ref="Generic.Arrays.DisallowLongArraySyntax">
+		<exclude-pattern>src/*</exclude-pattern>
+		<exclude-pattern>event-publisher-on-aws.php</exclude-pattern>
+	</rule>
+</ruleset>

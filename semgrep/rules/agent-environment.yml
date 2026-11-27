@@ -1,0 +1,14 @@
+rules:
+  - id: event-publisher-no-eval
+    patterns:
+      - pattern: eval(...)
+    message: >
+      eval() は禁止。ロジックを関数に落とすか、テスト用コードを tests/ に閉じる。
+    languages: [php]
+    paths:
+      include:
+        - event-publisher-on-aws.php
+        - uninstall.php
+        - src/
+    severity: ERROR
+
