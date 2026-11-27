@@ -47,6 +47,13 @@ class EventBridgePostEvents
     const VALID_SEND_MODES = array('sync', 'async');
     const VALID_LOG_LEVELS = array('error', 'info', 'debug');
 
+    /**
+     * AWS IAM role name (security-credentials path segment).
+     *
+     * @see https://docs.aws.amazon.com/IAM/latest/APIReference/API_CreateRole.html
+     */
+    const IMDS_IAM_ROLE_NAME_REGEX = '/^[A-Za-z0-9+=,.@_-]{1,64}$/';
+
     // Logging constants
     const LOG_DIR_NAME = 'eventbridge-logs';
 
@@ -493,7 +500,12 @@ class EventBridgePostEvents
         register_setting(
             'eventbridge_settings_group',
             self::OPTION_SETTINGS,
-            array($this, 'sanitize_settings')
+            array(
+                'type' => 'array',
+                'sanitize_callback' => array($this, 'sanitize_settings'),
+                'default' => $this->get_default_settings(),
+                'show_in_rest' => false,
+            )
         );
 
         // AWS Configuration Section
@@ -1138,15 +1150,12 @@ class EventBridgePostEvents
         $timestamp = current_time('Y-m-d H:i:s');
         $level_upper = strtoupper($level);
 
-        // Format context data
+        // Format context data (redact credentials and tokens)
         $context_str = '';
         if (!empty($context)) {
             $context_parts = array();
             foreach ($context as $key => $value) {
-                if (is_array($value) || is_object($value)) {
-                    $value = json_encode($value);
-                }
-                $context_parts[] = $key . '=' . $value;
+                $context_parts[] = $key . '=' . $this->format_log_context_value($key, $value);
             }
             $context_str = ' [' . implode(', ', $context_parts) . ']';
         }
@@ -1196,6 +1205,94 @@ class EventBridgePostEvents
     public function log_debug($message, $context = array())
     {
         $this->write_log('debug', $message, $context);
+    }
+
+    /**
+     * Whether a value looks like a valid IAM role name for IMDS credential paths.
+     *
+     * @param string $role_name Role name from IMDS
+     * @return bool
+     */
+    private function is_valid_imds_iam_role_name($role_name)
+    {
+        if (!is_string($role_name) || $role_name === '') {
+            return false;
+        }
+
+        // Reject path traversal or metadata multi-line responses before building a URL.
+        if (strpos($role_name, '/') !== false || strpos($role_name, "\n") !== false || strpos($role_name, "\r") !== false) {
+            return false;
+        }
+
+        return (bool) preg_match(self::IMDS_IAM_ROLE_NAME_REGEX, $role_name);
+    }
+
+    /**
+     * Format one log context value, redacting secrets and session tokens.
+     *
+     * @param string $key Context key
+     * @param mixed $value Context value
+     * @return string
+     */
+    private function format_log_context_value($key, $value)
+    {
+        if ($this->is_sensitive_log_context_key($key)) {
+            return '[REDACTED]';
+        }
+
+        if (is_array($value) || is_object($value)) {
+            $encoded = wp_json_encode($value);
+            return $encoded !== false ? $encoded : '[unserializable]';
+        }
+
+        return (string) $value;
+    }
+
+    /**
+     * @param string $key Log context array key
+     * @return bool
+     */
+    private function is_sensitive_log_context_key($key)
+    {
+        if (!is_string($key)) {
+            return true;
+        }
+
+        $normalized = strtolower($key);
+        $needles = array('secret', 'password', 'token', 'authorization', 'credential');
+        foreach ($needles as $needle) {
+            if (strpos($normalized, $needle) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Capability, HTTP method, and nonce checks for admin-post handlers.
+     *
+     * @param string $nonce_action Nonce action name
+     * @param string $nonce_field POST field containing the nonce
+     * @return void
+     */
+    private function verify_admin_post_request($nonce_action, $nonce_field)
+    {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('You do not have permission to perform this action.', 'eventbridge-post-events'));
+        }
+
+        if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') {
+            wp_die(
+                esc_html__('Invalid request method.', 'eventbridge-post-events'),
+                esc_html__('EventBridge Post Events', 'eventbridge-post-events'),
+                array('response' => 405)
+            );
+        }
+
+        if (!isset($_POST[$nonce_field]) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST[$nonce_field])), $nonce_action)) {
+            wp_die(esc_html__('Security check failed.', 'eventbridge-post-events'));
+        }
     }
 
     /**
@@ -1684,7 +1781,7 @@ class EventBridgePostEvents
         }
 
         $role_name = trim(wp_remote_retrieve_body($role_response));
-        if (empty($role_name)) {
+        if (empty($role_name) || !$this->is_valid_imds_iam_role_name($role_name)) {
             set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return null;
         }
@@ -2238,14 +2335,7 @@ class EventBridgePostEvents
      */
     public function handle_test_connection()
     {
-        // Security checks
-        if (!current_user_can('manage_options')) {
-            wp_die(esc_html__('You do not have permission to perform this action.', 'eventbridge-post-events'));
-        }
-
-        if (!isset($_POST['eventbridge_test_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['eventbridge_test_nonce'])), 'eventbridge_test_connection')) {
-            wp_die(esc_html__('Security check failed.', 'eventbridge-post-events'));
-        }
+        $this->verify_admin_post_request('eventbridge_test_connection', 'eventbridge_test_nonce');
 
         // Check if credentials and region are available (constructor may have bailed early)
         if (empty($this->access_key) || empty($this->secret_key) || empty($this->region)) {
@@ -2307,14 +2397,7 @@ class EventBridgePostEvents
      */
     public function handle_reset_metrics()
     {
-        // Security checks
-        if (!current_user_can('manage_options')) {
-            wp_die(esc_html__('You do not have permission to perform this action.', 'eventbridge-post-events'));
-        }
-
-        if (!isset($_POST['eventbridge_reset_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['eventbridge_reset_nonce'])), 'eventbridge_reset_metrics')) {
-            wp_die(esc_html__('Security check failed.', 'eventbridge-post-events'));
-        }
+        $this->verify_admin_post_request('eventbridge_reset_metrics', 'eventbridge_reset_nonce');
 
         // Reset metrics
         $this->successful_events = 0;
@@ -2344,14 +2427,7 @@ class EventBridgePostEvents
      */
     public function handle_clear_logs()
     {
-        // Security checks
-        if (!current_user_can('manage_options')) {
-            wp_die(esc_html__('You do not have permission to perform this action.', 'eventbridge-post-events'));
-        }
-
-        if (!isset($_POST['eventbridge_clear_logs_nonce']) || !wp_verify_nonce(sanitize_text_field(wp_unslash($_POST['eventbridge_clear_logs_nonce'])), 'eventbridge_clear_logs')) {
-            wp_die(esc_html__('Security check failed.', 'eventbridge-post-events'));
-        }
+        $this->verify_admin_post_request('eventbridge_clear_logs', 'eventbridge_clear_logs_nonce');
 
         // Clear log file by truncating it
         $log_file = $this->get_log_file_path();
