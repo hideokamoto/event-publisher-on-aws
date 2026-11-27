@@ -1215,7 +1215,7 @@ class EventBridgePostEvents
      */
     private function is_valid_imds_iam_role_name($role_name)
     {
-        if (!is_string($role_name) || $role_name === '') {
+        if ($role_name === '') {
             return false;
         }
 
@@ -1230,7 +1230,7 @@ class EventBridgePostEvents
     /**
      * Format one log context value, redacting secrets and session tokens.
      *
-     * @param string $key Context key
+     * @param mixed $key Context key
      * @param mixed $value Context value
      * @return string
      */
@@ -1249,7 +1249,7 @@ class EventBridgePostEvents
     }
 
     /**
-     * @param string $key Log context array key
+     * @param mixed $key Log context array key
      * @return bool
      */
     private function is_sensitive_log_context_key($key)
