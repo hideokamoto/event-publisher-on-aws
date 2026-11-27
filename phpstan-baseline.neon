@@ -117,7 +117,7 @@ parameters:
 		-
 			message: '#^Function current_user_can not found\.$#'
 			identifier: function.notFound
-			count: 7
+			count: 5
 			path: src/EventBridgePostEvents.php
 
 		-
@@ -153,7 +153,7 @@ parameters:
 		-
 			message: '#^Function esc_html__ not found\.$#'
 			identifier: function.notFound
-			count: 17
+			count: 15
 			path: src/EventBridgePostEvents.php
 
 		-
@@ -273,7 +273,7 @@ parameters:
 		-
 			message: '#^Function set_transient not found\.$#'
 			identifier: function.notFound
-			count: 18
+			count: 19
 			path: src/EventBridgePostEvents.php
 
 		-
@@ -315,7 +315,7 @@ parameters:
 		-
 			message: '#^Function wp_die not found\.$#'
 			identifier: function.notFound
-			count: 6
+			count: 3
 			path: src/EventBridgePostEvents.php
 
 		-
@@ -387,7 +387,7 @@ parameters:
 		-
 			message: '#^Function wp_verify_nonce not found\.$#'
 			identifier: function.notFound
-			count: 4
+			count: 2
 			path: src/EventBridgePostEvents.php
 
 		-
