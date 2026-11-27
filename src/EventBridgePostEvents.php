@@ -1781,13 +1781,14 @@ class EventBridgePostEvents
         }
 
         $role_body = wp_remote_retrieve_body($role_response);
-        if (!is_string($role_body) || preg_match('/[\r\n]/', $role_body)) {
+        if (!is_string($role_body)) {
             set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return null;
         }
 
-        $role_name = trim($role_body);
-        if ($role_name === '' || !$this->is_valid_imds_iam_role_name($role_name)) {
+        // Reject embedded newlines (multi-line / injection); allow a single trailing CR/LF only.
+        $role_name = rtrim($role_body, "\r\n");
+        if ($role_name === '' || preg_match('/[\r\n]/', $role_name) || !$this->is_valid_imds_iam_role_name($role_name)) {
             set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return null;
         }

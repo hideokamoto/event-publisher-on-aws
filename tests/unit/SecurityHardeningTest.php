@@ -139,6 +139,48 @@ class SecurityHardeningTest extends TestCase
         $this->assertNull($this->call_private('get_instance_credentials'));
     }
 
+    public function test_imds_role_list_with_trailing_newline_still_fetches_credentials()
+    {
+        $role_list_url = \EventBridgePostEvents::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/';
+        $credentials_url = $role_list_url . 'my-instance-role';
+        $credentials_body = json_encode([
+            'AccessKeyId' => 'ASIAINSTANCEROLE',
+            'SecretAccessKey' => 'instance-role-secret',
+            'Token' => 'instance-role-token',
+            'Expiration' => gmdate('Y-m-d\TH:i:s\Z', time() + 3600),
+        ]);
+
+        Functions\when('wp_remote_request')->justReturn([
+            'response' => ['code' => 200],
+            'body' => 'imds-token',
+        ]);
+        Functions\when('wp_remote_get')->alias(function ($url) use ($role_list_url, $credentials_url, $credentials_body) {
+            if ($url === $role_list_url) {
+                return [
+                    'response' => ['code' => 200],
+                    'body' => "my-instance-role\n",
+                ];
+            }
+            if ($url === $credentials_url) {
+                return [
+                    'response' => ['code' => 200],
+                    'body' => $credentials_body,
+                ];
+            }
+            $this->fail('Unexpected IMDS URL: ' . $url);
+        });
+        Functions\when('wp_remote_retrieve_response_code')->alias(function ($response) {
+            return $response['response']['code'];
+        });
+        Functions\when('wp_remote_retrieve_body')->alias(function ($response) {
+            return $response['body'];
+        });
+
+        $credentials = $this->call_private('get_instance_credentials');
+        $this->assertIsArray($credentials);
+        $this->assertSame('ASIAINSTANCEROLE', $credentials['AccessKeyId']);
+    }
+
     public function test_format_log_context_value_redacts_sensitive_keys()
     {
         $this->assertSame(
