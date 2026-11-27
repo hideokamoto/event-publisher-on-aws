@@ -113,28 +113,11 @@ Integration tests run with WordPress and test plugin integration:
 
 The current unit tests have architectural limitations due to the plugin's structure:
 
-1. **Plugin Structure**: All classes are defined in a single `event-publisher-on-aws.php` file and are instantiated immediately when the file is loaded. This makes true unit testing (testing classes in isolation) difficult.
+1. **Plugin Structure**: Production code lives under `src/`. Unit tests should load classes via `tests/support/load-src.php` instead of `event-publisher-on-aws.php` so WordPress hooks are not registered during isolation tests.
 
-2. **Mock-Only Tests**: Some unit tests (e.g., `CredentialResolutionTest`, `RegionDetectionTest`, `EventBridgeErrorHandlingTest`) currently verify that Brain Monkey mocking works rather than testing actual plugin code behavior. They re-implement logic instead of calling plugin methods.
+2. **Private methods**: Use `tests/support/ReflectionTestHelper.php` to exercise private helpers (for example `EventBridgePutEvents::getSignatureKey()` and `hasRetryableFailedEntry()`).
 
-3. **Integration Tests Work Well**: The integration tests (`PostStatusTransitionTest`, `AdminSettingsTest`, `ActivationDeactivationTest`) properly test real plugin behavior with WordPress loaded and are effective at catching bugs.
-
-### Recommended Future Improvements
-
-To enable proper unit testing, consider refactoring the plugin:
-
-1. **Separate Classes**: Move `EventBridgePutEvents` and `EventBridgePostEvents` classes to separate files under a `src/` directory
-2. **PSR-4 Autoloading**: Add PSR-4 autoloading for production code in `composer.json`
-3. **Dependency Injection**: Pass dependencies (HTTP client, WordPress functions) to constructors rather than using global functions
-4. **Testable Methods**: Make key methods public or protected for testing (e.g., `getSignatureKey()`)
-
-This would allow unit tests to:
-- Instantiate classes directly
-- Mock dependencies properly
-- Test actual production code behavior
-- Isolate and test individual components
-
-For now, the integration tests provide good coverage of the plugin's WordPress integration.
+3. **Integration Tests**: `PostStatusTransitionTest`, `AdminSettingsTest`, and `ActivationDeactivationTest` remain the authoritative checks for WordPress integration.
 
 ## Test Configuration
 

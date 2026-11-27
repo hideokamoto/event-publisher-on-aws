@@ -110,7 +110,7 @@ class SendEventRetryTest extends TestCase
         Functions\when('is_admin')->justReturn(false);
 
         if (!class_exists('EventBridgePutEvents')) {
-            require_once dirname(dirname(__DIR__)) . '/event-publisher-on-aws.php';
+            require_once dirname(__DIR__) . '/support/load-src.php';
         }
 
         // Functions sendEvent() calls

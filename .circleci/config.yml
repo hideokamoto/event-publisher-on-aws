@@ -1,6 +1,22 @@
 version: 2.1
 
 jobs:
+  static-analysis:
+    docker:
+      - image: cimg/php:8.3
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: Install jq
+          command: sudo apt-get update && sudo apt-get install -y jq
+      - run:
+          name: Composer install (dev)
+          command: composer install --no-interaction --no-progress
+      - run:
+          name: Composer lint (syntax, PHPCS security, PHPStan)
+          command: composer lint
+
   agent-check:
     docker:
       - image: cimg/base:current
@@ -110,6 +126,7 @@ workflows:
   security:
     jobs:
       - agent-check
+      - static-analysis
       - semgrep-scan
 
   # main へのマージで semantic-release が Conventional Commits から版を決めてリリースする

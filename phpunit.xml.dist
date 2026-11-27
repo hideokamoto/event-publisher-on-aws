@@ -20,6 +20,7 @@
     <coverage>
         <include>
             <file>event-publisher-on-aws.php</file>
+            <directory>src</directory>
         </include>
     </coverage>
 

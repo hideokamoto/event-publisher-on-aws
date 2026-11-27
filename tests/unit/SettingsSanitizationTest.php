@@ -27,6 +27,9 @@ class SettingsSanitizationTest extends TestCase
         // Mock WordPress functions BEFORE loading plugin file
         Functions\when('__')->returnArg();
         Functions\when('esc_html__')->returnArg();
+        Functions\when('wp_unslash')->alias(function ($value) {
+            return $value;
+        });
         Functions\when('sanitize_text_field')->alias(function($str) {
             // Strip tags and remove null bytes like WordPress does
             $str = strip_tags($str);
@@ -75,7 +78,7 @@ class SettingsSanitizationTest extends TestCase
 
         // Load the plugin file to get EventBridgePostEvents class (after mocks are set up)
         if (!class_exists('EventBridgePostEvents')) {
-            require_once dirname(dirname(__DIR__)) . '/event-publisher-on-aws.php';
+            require_once dirname(__DIR__) . '/support/load-src.php';
         }
 
         // Create instance and use reflection to access private methods

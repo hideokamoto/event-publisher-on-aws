@@ -39,7 +39,15 @@ fi
 echo "ok: vendor/ in .gitignore"
 
 echo "== forbidden patterns in production PHP =="
-PROD_PHP=(event-publisher-on-aws.php uninstall.php)
+PROD_PHP=(
+  event-publisher-on-aws.php
+  uninstall.php
+  src/bootstrap.php
+  src/imds.php
+  src/EventBridgePutEvents.php
+  src/EventBridgePostEvents.php
+  src/lifecycle.php
+)
 for f in "${PROD_PHP[@]}"; do
   if [ ! -f "$f" ]; then
     continue

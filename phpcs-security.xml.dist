@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<ruleset name="event-publisher-security">
+	<description>Security-focused sniffs (must pass on CI; fix violations, do not baseline).</description>
+
+	<file>event-publisher-on-aws.php</file>
+	<file>src</file>
+	<file>uninstall.php</file>
+
+	<exclude-pattern>*/vendor/*</exclude-pattern>
+	<exclude-pattern>*/tests/*</exclude-pattern>
+
+	<rule ref="WordPress.Security.EscapeOutput"/>
+	<rule ref="WordPress.Security.NonceVerification"/>
+	<rule ref="WordPress.Security.ValidatedSanitizedInput"/>
+	<rule ref="WordPress.Security.SafeRedirect"/>
+</ruleset>

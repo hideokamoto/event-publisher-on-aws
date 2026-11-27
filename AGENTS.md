@@ -1,6 +1,6 @@
 # Event Publisher on AWS — エージェント向けガイド
 
-このリポジトリは **WordPress プラグイン 1 本**（`event-publisher-on-aws.php`、約 3,200 行）です。エージェントの主な入力はこのファイルなので、ここに残った workaround がそのまま「正しいパターン」としてコピーされます（[Poteto pyramid](https://www.youtube.com/watch?v=O_zcc6Xl12g) の codebase 層）。
+このリポジトリは **WordPress プラグイン**です。エントリは `event-publisher-on-aws.php`（ヘッダーと bootstrap のみ）、実装は `src/` 配下です。エージェントの入力は主に `src/*.php` なので、ここに残った workaround が「正しいパターン」としてコピーされます（[Poteto pyramid](https://www.youtube.com/watch?v=O_zcc6Xl12g) の codebase 層）。
 
 ## 目的
 
@@ -10,9 +10,11 @@
 
 | 要素 | 役割 |
 |------|------|
-| `eventbridge_*()` 関数 | IMDSv2 / 有効化フック用のトップレベルヘルパー |
-| `EventBridgePutEvents` | AWS 署名・HTTP・リトライ・PutEvents |
-| `EventBridgePostEvents` | WP フック、設定画面、イベント組み立て・送信 |
+| `event-publisher-on-aws.php` | プラグインヘッダー・フック登録・`src/bootstrap.php` の読み込み |
+| `src/imds.php` | IMDSv2 ヘルパー関数 |
+| `src/lifecycle.php` | 有効化・無効化コールバック |
+| `src/EventBridgePutEvents.php` | AWS 署名・HTTP・リトライ・PutEvents |
+| `src/EventBridgePostEvents.php` | WP フック、設定画面、イベント組み立て・送信 |
 | `tests/unit/` | Brain Monkey（WordPress なし） |
 | `tests/integration/` | wp-env + 実 WP |
 
@@ -20,7 +22,7 @@
 
 - 本番コードに Composer の `require` は置かない（`require` は PHP バージョンのみ）。
 - `vendor/` はリポジトリに含めない。配布物にも含めない。
-- 新機能は原則 **既存の 1 ファイル** に追加する。`src/` 分割は明示的なリファクタ依頼があるまで行わない（テスト README の将来案と混同しない）。
+- 新機能は **適切な `src/` ファイル** に置く。新規トップレベル PHP を増やさない（`src/bootstrap.php` 経由で読み込む）。
 - AWS 呼び出しは `EventBridgePutEvents` 経由。管理画面は `EventBridgePostEvents`。
 - 設定の上書きは `wp-config.php` の定数（`EVENT_BUS_NAME` 等）または `eventbridge_settings` オプション。
 
@@ -36,7 +38,8 @@
 ## 静的解析（コストが低い順）
 
 ```bash
-npm run agent:check    # jq + 構造チェック（PHP 不要）
+npm run agent:check    # jq + 構造 + php -l（PHP がある場合）
+composer lint          # php -l + PHPCS(security) + PHPStan（baseline 付き）
 # CircleCI と同じ Semgrep（ローカルに semgrep がある場合）
 semgrep scan --config p/default --config p/php --config semgrep/rules/agent-environment.yml .
 ```

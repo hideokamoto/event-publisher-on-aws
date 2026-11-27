@@ -62,7 +62,7 @@ class PayloadValidationTest extends TestCase
 
         // Load the plugin file to get EventBridgePutEvents class (after mocks are set up)
         if (!class_exists('EventBridgePutEvents')) {
-            require_once dirname(dirname(__DIR__)) . '/event-publisher-on-aws.php';
+            require_once dirname(__DIR__) . '/support/load-src.php';
         }
     }
 

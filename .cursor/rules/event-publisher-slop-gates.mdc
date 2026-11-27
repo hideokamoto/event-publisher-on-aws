@@ -9,7 +9,7 @@ Read `AGENTS.md` at the repo root before editing production code.
 
 ## Codebase
 
-- Production code lives in `event-publisher-on-aws.php` and `uninstall.php` unless the user explicitly requests a split into `src/`.
+- Production code lives under `src/` and is loaded from `event-publisher-on-aws.php`. Do not add new root-level PHP files.
 - Put AWS HTTP/signing in `EventBridgePutEvents`. Put WordPress hooks and admin UI in `EventBridgePostEvents`.
 
 ## Static checks (run before claiming done)

@@ -10,7 +10,8 @@
     "test:unit": "wp-env run tests-cli --env-cwd=wp-content/plugins/event-publisher-on-aws vendor/bin/phpunit --bootstrap tests/bootstrap-unit.php --testsuite unit",
     "test:integration": "wp-env run tests-cli --env-cwd=wp-content/plugins/event-publisher-on-aws vendor/bin/phpunit --testsuite integration",
     "test": "npm run test:unit && npm run test:integration",
-    "agent:check": "bash scripts/agent-check.sh"
+    "agent:check": "bash scripts/agent-check.sh",
+    "lint": "composer lint"
   },
   "keywords": [],
   "author": "hideokamoto",
