@@ -273,7 +273,7 @@ parameters:
 		-
 			message: '#^Function set_transient not found\.$#'
 			identifier: function.notFound
-			count: 18
+			count: 19
 			path: src/EventBridgePostEvents.php
 
 		-
