@@ -1780,8 +1780,14 @@ class EventBridgePostEvents
             return null;
         }
 
-        $role_name = trim(wp_remote_retrieve_body($role_response));
-        if (empty($role_name) || !$this->is_valid_imds_iam_role_name($role_name)) {
+        $role_body = wp_remote_retrieve_body($role_response);
+        if (!is_string($role_body) || preg_match('/[\r\n]/', $role_body)) {
+            set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
+            return null;
+        }
+
+        $role_name = trim($role_body);
+        if ($role_name === '' || !$this->is_valid_imds_iam_role_name($role_name)) {
             set_transient(self::TRANSIENT_IMDS_FAILED, true, self::IMDS_FAILED_CACHE_DURATION);
             return null;
         }

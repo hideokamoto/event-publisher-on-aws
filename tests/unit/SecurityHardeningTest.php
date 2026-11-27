@@ -55,6 +55,9 @@ class SecurityHardeningTest extends TestCase
         Functions\when('wp_json_encode')->alias(function ($data) {
             return json_encode($data);
         });
+        Functions\when('is_wp_error')->alias(function ($thing) {
+            return $thing instanceof \WP_Error;
+        });
 
         if (!class_exists('EventBridgePostEvents', false)) {
             require_once dirname(__DIR__, 2) . '/src/EventBridgePostEvents.php';
@@ -84,18 +87,47 @@ class SecurityHardeningTest extends TestCase
 
     public function test_invalid_imds_role_name_skips_credential_fetch()
     {
+        $role_list_url = \EventBridgePostEvents::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/';
+
         Functions\when('wp_remote_request')->justReturn([
             'response' => ['code' => 200],
             'body' => 'imds-token',
         ]);
-        Functions\when('wp_remote_get')->alias(function ($url) {
-            if (substr($url, -1) === '/') {
+        Functions\when('wp_remote_get')->alias(function ($url) use ($role_list_url) {
+            if ($url === $role_list_url) {
                 return [
                     'response' => ['code' => 200],
                     'body' => '../../latest/meta-data/',
                 ];
             }
             $this->fail('Credential URL must not be requested for an invalid role name: ' . $url);
+        });
+        Functions\when('wp_remote_retrieve_response_code')->alias(function ($response) {
+            return $response['response']['code'];
+        });
+        Functions\when('wp_remote_retrieve_body')->alias(function ($response) {
+            return $response['body'];
+        });
+
+        $this->assertNull($this->call_private('get_instance_credentials'));
+    }
+
+    public function test_imds_role_list_with_surrounding_newlines_rejects_credential_fetch()
+    {
+        $role_list_url = \EventBridgePostEvents::IMDS_BASE_URL . '/latest/meta-data/iam/security-credentials/';
+
+        Functions\when('wp_remote_request')->justReturn([
+            'response' => ['code' => 200],
+            'body' => 'imds-token',
+        ]);
+        Functions\when('wp_remote_get')->alias(function ($url) use ($role_list_url) {
+            if ($url === $role_list_url) {
+                return [
+                    'response' => ['code' => 200],
+                    'body' => "\nmy-instance-role\n",
+                ];
+            }
+            $this->fail('Credential URL must not be requested when role list body contains newlines: ' . $url);
         });
         Functions\when('wp_remote_retrieve_response_code')->alias(function ($response) {
             return $response['response']['code'];
