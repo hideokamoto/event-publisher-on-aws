@@ -15,8 +15,8 @@ if ! command -v jq >/dev/null 2>&1; then
   fail "jq is required"
 fi
 
-if ! REQUIRE_KEYS="$(jq -r '.require // {} | keys[]' composer.json 2>&1)"; then
-  fail "cannot parse composer.json require section: ${REQUIRE_KEYS}"
+if ! REQUIRE_KEYS="$(jq -r '.require // {} | keys[]' composer.json 2>/dev/null)"; then
+  fail "cannot parse composer.json require section"
 fi
 
 if [ -z "$REQUIRE_KEYS" ]; then
